@@ -260,7 +260,6 @@ def fetch_all_codeberg_issues(source: str) -> list[dict]:
         params = {
             "state": "all",
             "type": "issues",
-            "sort": "asc",
             "page": page,
             "limit": 50,
         }
@@ -271,6 +270,7 @@ def fetch_all_codeberg_issues(source: str) -> list[dict]:
             break
         issues.extend(data)
         page += 1
+    issues.sort(key=lambda i: i["created_at"])
     return issues
 
 
