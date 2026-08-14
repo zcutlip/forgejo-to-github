@@ -12,6 +12,7 @@ import time
 import requests
 
 CODEBERG_BASE = "https://codeberg.org/api/v1"
+CODEBERG_WEB = "https://codeberg.org"
 GITHUB_BASE = "https://api.github.com"
 
 STATE_FILE = "state.json"
@@ -302,9 +303,13 @@ def close_github_issue(target: str, issue_number: int) -> None:
     gh_request("PATCH", url, json={"state": "closed"})
 
 
-def format_issue_body(cb_index: int, author: str, date: str, body: str | None) -> str:
+def format_issue_body(
+    source: str, cb_index: int, author: str, date: str, body: str | None
+) -> str:
     return (
-        f"> 📦 **Migrated from Codeberg** (Original Issue #{cb_index})\n"
+        f"> **Migrated from Codeberg** "
+        f"([Original Issue #{cb_index}]"
+        f"({CODEBERG_WEB}/{source}/issues/{cb_index}))\n"
         f"> **Author:** @{author} | **Date:** {date}\n\n"
         f"{body or ''}"
     )
@@ -410,7 +415,7 @@ def migrate(
         labels = [label["name"] for label in issue.get("labels", [])]
 
         formatted_body = format_issue_body(
-            cb_index, original_author, created_at, issue.get("body")
+            source, cb_index, original_author, created_at, issue.get("body")
         )
 
         if dry_run:
