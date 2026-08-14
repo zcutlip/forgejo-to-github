@@ -176,7 +176,7 @@ def confirm(prompt: str, *, yes: bool) -> bool:
 def check_target_repo(target: str) -> dict[str, object] | None:
     """Check if target repo exists on GitHub. Returns repo info or None."""
     url = f"{GITHUB_BASE}/repos/{target}"
-    resp = requests.get(url, headers=gh_headers())
+    resp = requests.get(url, headers=gh_headers(), timeout=30)
     if resp.status_code == 200:
         return resp.json()
     if resp.status_code == 404:
@@ -264,7 +264,7 @@ def fetch_all_codeberg_issues(source: str) -> list[dict]:
             "page": page,
             "limit": 50,
         }
-        res = requests.get(url, headers=cb_headers(), params=params)
+        res = requests.get(url, headers=cb_headers(), params=params, timeout=30)
         res.raise_for_status()
         data: list[dict] = res.json()
         if not data:
@@ -277,7 +277,7 @@ def fetch_all_codeberg_issues(source: str) -> list[dict]:
 def fetch_codeberg_comments(source: str, issue_index: int) -> list[dict]:
     """Fetch comments for a specific issue index on Codeberg."""
     url = f"{CODEBERG_BASE}/repos/{source}/issues/{issue_index}/comments"
-    res = requests.get(url, headers=cb_headers())
+    res = requests.get(url, headers=cb_headers(), timeout=30)
     res.raise_for_status()
     return res.json()
 
