@@ -6,6 +6,7 @@ import os
 import random
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -360,21 +361,26 @@ def migrate(
             print(f"  [DRY RUN] Would create {visibility} repo '{target}'")
             repo_created = True
     else:
-        # Repo exists — warn if it has issues
-        open_count = repo_info.get("open_issues_count", 0)
-        if (
-            open_count > 0
-            and not yes
-            and not confirm(
-                f"WARNING: Target repo '{target}' already has {open_count} "
-                f"issues. Migration will add new issues alongside them. "
-                f"Continue?",
-                yes=False,  # always prompt: overriding existing issues is dangerous
+        # Repo exists
+        if migrated:
+            print(
+                f"  Resuming migration. {len(migrated)} issue(s) already migrated, skipping."
             )
-        ):
-            raise SystemExit("Aborted.")
-        if open_count > 0 and yes:
-            print(f"  Target repo '{target}' has {open_count} existing issues.")
+        else:
+            open_count = repo_info.get("open_issues_count", 0)
+            if (
+                open_count > 0
+                and not yes
+                and not confirm(
+                    f"WARNING: Target repo '{target}' already has {open_count} "
+                    f"issues. Migration will add new issues alongside them. "
+                    f"Continue?",
+                    yes=False,  # always prompt: overriding existing issues is dangerous
+                )
+            ):
+                raise SystemExit("Aborted.")
+            if open_count > 0 and yes:
+                print(f"  Target repo '{target}' has {open_count} existing issues.")
         print(f"  Target repo '{target}' exists and is accessible.")
 
     # --- Phase 2: Git mirror ---
@@ -500,4 +506,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Terminating.", file=sys.stderr)
