@@ -40,7 +40,7 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
 ### C. Testing & Verification Rules
 - Before submitting PRs or finalizing changes, run:
   - `pytest` for unit/integration test validation.
-  - `ruff check .` and `mypy src/` for static analysis and type safety.
+  - `ruff check .` and `mypy f2gh.py` for static analysis and type safety.
 - Test external API integrations using mocked responses (`responses` or `unittest.mock`) to avoid hitting live APIs during routine test suite runs.
 
 ---
@@ -51,10 +51,11 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
 # Environment setup
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .   # editable install → `f2gh` command (or `pipx install .`)
 
 # Run migration in dry-run mode
-python migrate.py --source owner/repo --target owner/repo --dry-run
+f2gh --source owner/repo --target owner/repo --dry-run
+# (no-install fallback: ./f2gh.py --source owner/repo --target owner/repo --dry-run)
 
 # Run linter & tests
 ruff check .
