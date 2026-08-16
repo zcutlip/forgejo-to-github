@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forgejo-to-github"
+version = "0.1.0"
+description = "Migrate repos from Codeberg/Forgejo to GitHub: issues, comments, labels, git mirror"
+requires-python = ">=3.10"
+dependencies = ["requests"]
+
+[project.optional-dependencies]
+dev = ["types-requests"]
+
+[project.scripts]
+f2gh = "f2gh:main"
+
+[tool.setuptools]
+py-modules = ["f2gh"]
