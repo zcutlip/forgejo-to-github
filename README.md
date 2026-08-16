@@ -57,7 +57,7 @@ The target repo is created for you (private by default) if it doesn't already ex
 | `--yes` | Skip interactive prompts (scripting/CI) |
 | `--skip-git` | Skip the git mirror; migrate issues only |
 | `--public` | Create the target repo public (default: private) |
-| `--description TEXT` | Repo description on GitHub (default: "Migrated from Codeberg") |
+| `--description TEXT` | Repo description on GitHub (default: copied from Codeberg, fallback "Migrated from Codeberg") |
 
 ## Development
 
