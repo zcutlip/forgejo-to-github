@@ -259,7 +259,7 @@ def fetch_all_codeberg_issues(source: str) -> list[dict]:
     page = 1
     while True:
         url = f"{CODEBERG_BASE}/repos/{source}/issues"
-        params = {
+        params: dict[str, str | int] = {
             "state": "all",
             "type": "issues",
             "page": page,
@@ -368,6 +368,7 @@ def migrate(
             )
         else:
             open_count = repo_info.get("open_issues_count", 0)
+            open_count = open_count if isinstance(open_count, int) else 0
             if (
                 open_count > 0
                 and not yes
