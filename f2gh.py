@@ -156,8 +156,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--description",
         metavar="TEXT",
-        default="Migrated from Codeberg",
-        help='Repo description on GitHub (default: "Migrated from Codeberg")',
+        default=None,
+        help='Repo description on GitHub (default: copied from Codeberg, fallback "Migrated from Codeberg")',
     )
     return parser.parse_args()
 
@@ -187,6 +187,15 @@ def check_target_repo(target: str) -> dict[str, object] | None:
         raise SystemExit(f"Token lacks access to '{target}' (HTTP 403).")
     resp.raise_for_status()
     return None
+
+
+def fetch_codeberg_description(source: str) -> str:
+    """Fetch the source repo's description from Codeberg."""
+    url = f"{CODEBERG_BASE}/repos/{source}"
+    resp = requests.get(url, headers=cb_headers(), timeout=30)
+    resp.raise_for_status()
+    desc = resp.json().get("description")
+    return desc if isinstance(desc, str) and desc else "Migrated from Codeberg"
 
 
 def create_github_repo(
@@ -327,7 +336,7 @@ def migrate(
     yes: bool,
     skip_git: bool,
     public: bool,
-    description: str,
+    description: str | None,
 ) -> None:
     """Main migration logic."""
     state = load_state(source, target)
@@ -350,6 +359,12 @@ def migrate(
         # Repo doesn't exist — prompt to create
         if not confirm(f"Target '{target}' does not exist. Create it?", yes=yes):
             raise SystemExit("Aborted.")
+
+        if description is None:
+            try:
+                description = fetch_codeberg_description(source)
+            except (requests.HTTPError, requests.ConnectionError, requests.Timeout):
+                description = "Migrated from Codeberg"
 
         visibility = "public" if public else "private"
         print(f"Creating {visibility} repo '{target}'...")
