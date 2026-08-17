@@ -356,8 +356,10 @@ def migrate(
     repo_info = check_target_repo(target)
 
     if repo_info is None:
-        # Repo doesn't exist — prompt to create
-        if not confirm(f"Target '{target}' does not exist. Create it?", yes=yes):
+        # Repo doesn't exist — prompt to create (skip in dry-run: nothing is created)
+        if not dry_run and not confirm(
+            f"Target '{target}' does not exist. Create it?", yes=yes
+        ):
             raise SystemExit("Aborted.")
 
         if description is None:
@@ -386,6 +388,7 @@ def migrate(
             open_count = open_count if isinstance(open_count, int) else 0
             if (
                 open_count > 0
+                and not dry_run
                 and not yes
                 and not confirm(
                     f"WARNING: Target repo '{target}' already has {open_count} "
