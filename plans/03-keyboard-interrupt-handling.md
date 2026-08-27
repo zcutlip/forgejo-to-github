@@ -1,5 +1,7 @@
 # KeyboardInterrupt handling — table stakes for CLI
 
+**GitHub issue:** [#4](https://github.com/zcutlip/forgejo-to-github/issues/4)
+
 ## Context
 
 Current `f2gh.py` has at line 528-531:

@@ -1,5 +1,7 @@
 # Local clone invocation simplification & avoid redundant clone
 
+**GitHub issue:** [#6](https://github.com/zcutlip/forgejo-to-github/issues/6)
+
 ## Context
 
 Typical invocation from inside local clone:

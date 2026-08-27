@@ -1,5 +1,7 @@
 # Clone failure follow-up (f2gh.py:237)
 
+**GitHub issue:** [#2](https://github.com/zcutlip/forgejo-to-github/issues/2)
+
 ## Summary
 
 `git clone --mirror` originally blew up with `CalledProcessError` on network failure (exit 128), unlike `push` which already had graceful handling. The initial failure has since been addressed; this plan tracks verification and follow-up behavior.

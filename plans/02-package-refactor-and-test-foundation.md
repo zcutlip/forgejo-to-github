@@ -1,5 +1,7 @@
 # Package refactor and test foundation
 
+**GitHub issue:** [#3](https://github.com/zcutlip/forgejo-to-github/issues/3)
+
 ## Purpose
 
 Refactor the monolithic `f2gh.py` script into a small, multi-file Python package

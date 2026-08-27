@@ -1,5 +1,7 @@
 # Retain successful git clone in state.json for retry
 
+**GitHub issue:** [#5](https://github.com/zcutlip/forgejo-to-github/issues/5)
+
 ## Context
 
 If migration fails after `git clone --mirror` succeeded (mirror in `/tmp` `f2gh-*`), we discard it via `shutil.rmtree` in `finally`, forcing re-clone on retry. For large repos or flaky network (exit 128 at clone), this wastes time/bandwidth.
