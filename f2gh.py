@@ -359,7 +359,7 @@ def mirror_git_repo(source: str, target: str, dry_run: bool) -> None:
                     f"     git push github --all\n"
                     f"     git push github --tags\n"
                     f"     f2gh --source {source} --target {target} --skip-git\n"
-                    "     Note: --all pushes only local branches. If some missing, run git fetch --all first.\n"
+                    "     Note: --all pushes only local branches. If some are missing, run git fetch --all first.\n"
                 )
                 print(message, file=sys.stderr)
                 raise SystemExit(_ExitMessage(message))
@@ -427,7 +427,7 @@ def mirror_git_repo(source: str, target: str, dry_run: bool) -> None:
                     f"     git push github --all\n"
                     f"     git push github --tags\n"
                     f"     f2gh --source {source} --target {target} --skip-git\n"
-                    "     Note: --all pushes only local branches. If some missing, run git fetch --all first.\n"
+                    "     Note: --all pushes only local branches. If some are missing, run git fetch --all first.\n"
                 )
                 print(message, file=sys.stderr)
                 raise SystemExit(_ExitMessage(message))
@@ -546,6 +546,7 @@ def migrate(
     migrated: dict[int, int] = state["migrated"]  # type: ignore[assignment]
     repo_created: bool = state["repo_created"]  # type: ignore[assignment]
     git_pushed: bool = state["git_pushed"]  # type: ignore[assignment]
+    just_created: bool = False
 
     stats: dict[str, int] = {
         "created": 0,
@@ -578,10 +579,10 @@ def migrate(
         if not dry_run:
             create_github_repo(target, description, public)
             repo_created = True
+            just_created = True
             save_state(source, target, repo_created, git_pushed, migrated)
         else:
             print(f"  [DRY RUN] Would create {visibility} repo '{target}'")
-            repo_created = True
     else:
         # Repo exists
         if migrated:
@@ -624,12 +625,22 @@ def migrate(
                     requests.Timeout,
                     requests.RequestException,
                 ) as e:
-                    raw = str(e)[:500]
+                    raw = str(e)
+                    if "Git push rejected by GitHub" in raw:
+                        short = (
+                            "workflow scope rejected (OAuth token lacks workflow scope)"
+                        )
+                    else:
+                        # first non-empty line, capped at 200 to avoid mid-URL truncation
+                        lines = [ln for ln in raw.splitlines() if ln.strip()]
+                        short = lines[0].strip() if lines else raw.strip()
+                        if len(short) > 200:
+                            short = short[:200]
                     try:
                         _tok = get_github_token()
-                        git_error = _redact_token(raw, _tok)
+                        git_error = _redact_token(short, _tok)
                     except SystemExit:
-                        git_error = raw
+                        git_error = short
                     print("  Git mirror failed — continuing to issue migration")
             else:
                 print("[DRY RUN] Would clone mirror from Codeberg and push to GitHub")
@@ -757,10 +768,29 @@ def migrate(
             print(f"  FAILED [{step}] CB #{cb_index} '{title}': {e}\n")
             continue
 
+    has_git_failure = git_error is not None
+    has_issue_failures = bool(errors) or stats["failures"] > 0
+    _cb_issues = locals().get("cb_issues", None)
+    is_empty_source = len(_cb_issues) == 0 if isinstance(_cb_issues, list) else False
+    repo_display = (
+        "created"
+        if just_created
+        else (
+            "existing"
+            if repo_info is not None
+            else ("would be created" if dry_run else "existing")
+        )
+    )
+    if has_git_failure or has_issue_failures:
+        header = "\nMigration finished with errors"
+    elif is_empty_source:
+        header = "\nMigration finished"
+    else:
+        header = "\nMigration complete!"
     print(
-        "\nMigration complete!"
+        f"{header}"
         f"\n  Target repo: {target}"
-        f"\n  Repo: {'created' if repo_created else 'existing'}"
+        f"\n  Repo: {repo_display}"
         f"\n  Issues created: {stats['created']}"
     )
     if stats["skipped"]:
@@ -772,10 +802,6 @@ def migrate(
         print(f"  Git: FAILED — {git_error}")
     else:
         print(f"  Git: {'pushed' if git_pushed else 'skipped'}")
-    has_git_failure = git_error is not None
-    has_issue_failures = bool(errors) or stats["failures"] > 0
-    _cb_issues = locals().get("cb_issues", None)
-    is_empty_source = len(_cb_issues) == 0 if isinstance(_cb_issues, list) else False
 
     if errors:
         print("\n  Failed issues:")
