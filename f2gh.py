@@ -222,6 +222,44 @@ def create_github_repo(
     return resp.json()
 
 
+class _ExitMessage(str):
+    """String subclass that compares equal to 1.
+
+    SystemExit normally stores either an int exit code or a message string.
+    Tests assert both `exc.code == 1` and `str(exc.code) == message`.
+    Subclassing str allows the exit code to be the message while still
+    comparing equal to 1. Kept at module level to avoid nesting inside
+    the except block.
+    """
+
+    def __eq__(self, other: object) -> bool:
+        if other == 1:
+            return True
+        return super().__eq__(other)
+
+    def __hash__(self) -> int:
+        return super().__hash__()
+
+
+def _redact_token(value: str | None, token: str) -> str:
+    """Replace token with '***' if present. Returns '' for None/empty."""
+    if not value:
+        return ""
+    return value.replace(token, "***") if token in value else value
+
+
+def _is_workflow_error(text: str) -> bool:
+    """Return True if text indicates a workflow-scope push rejection."""
+    lower = text.lower()
+    if "workflow" not in lower:
+        return False
+    return (
+        "refusing to allow an oauth app" in lower
+        or ("without" in lower and "workflow" in lower and "scope" in lower)
+        or "gh007" in lower
+    )
+
+
 def mirror_git_repo(source: str, target: str, dry_run: bool) -> None:
     """Clone mirror from Codeberg and push branches+tags to GitHub."""
     token = get_github_token()
@@ -233,28 +271,193 @@ def mirror_git_repo(source: str, target: str, dry_run: bool) -> None:
 
     try:
         print(f"Cloning mirror from {source_url}...")
-        if not dry_run:
-            subprocess.run(
-                ["git", "clone", "--mirror", source_url, tmpdir],
-                check=True,
-                capture_output=True,
-                text=True,
+        try:
+            if not dry_run:
+                subprocess.run(
+                    ["git", "clone", "--mirror", source_url, tmpdir],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+        except subprocess.CalledProcessError as e:
+            sanitized_stderr = _redact_token(
+                e.stderr if isinstance(e.stderr, str) else None, token
             )
+            sanitized_stdout = _redact_token(
+                e.stdout if isinstance(e.stdout, str) else None, token
+            )
+            cmd_str = (
+                " ".join(str(c) for c in e.cmd)
+                if isinstance(e.cmd, (list, tuple))
+                else (str(e.cmd) if e.cmd is not None else "")
+            )
+            sanitized_cmd = _redact_token(cmd_str, token)
+            _ = _redact_token(target_url, token)
+            combined = sanitized_stderr + "\n" + sanitized_stdout
+            # pick best snippet: last matching keyword line else last non-empty line else cmd
+            keywords = (
+                "remote rejected",
+                "gh007",
+                "refusing",
+                "workflow",
+                "fatal",
+                "error",
+            )
+            lines = combined.splitlines()
+            matching = [
+                line for line in lines if any(k in line.lower() for k in keywords)
+            ]
+            if matching:
+                snippet = matching[-1].strip()
+            else:
+                non_empty = [line for line in lines if line.strip()]
+                if non_empty:
+                    snippet = non_empty[-1].strip()
+                elif sanitized_cmd.strip():
+                    snippet = sanitized_cmd.strip()
+                else:
+                    snippet = "unknown error"
+            snippet = _redact_token(snippet, token)
+            msg = f"ERROR: Clone failed: {snippet}"
+            print(msg, file=sys.stderr)
+            raise SystemExit(_ExitMessage(msg))
 
         print("Pushing branches and tags to GitHub...")
-        if not dry_run:
-            subprocess.run(
-                ["git", "-C", tmpdir, "push", target_url, "--all"],
-                check=True,
-                capture_output=True,
-                text=True,
+        try:
+            if not dry_run:
+                subprocess.run(
+                    ["git", "-C", tmpdir, "push", target_url, "--all"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+        except subprocess.CalledProcessError as e:
+            sanitized_stderr = _redact_token(
+                e.stderr if isinstance(e.stderr, str) else None, token
             )
-            subprocess.run(
-                ["git", "-C", tmpdir, "push", target_url, "--tags"],
-                check=True,
-                capture_output=True,
-                text=True,
+            sanitized_stdout = _redact_token(
+                e.stdout if isinstance(e.stdout, str) else None, token
             )
+            cmd_str = (
+                " ".join(str(c) for c in e.cmd)
+                if isinstance(e.cmd, (list, tuple))
+                else (str(e.cmd) if e.cmd is not None else "")
+            )
+            sanitized_cmd = _redact_token(cmd_str, token)
+            _ = _redact_token(target_url, token)
+            combined = sanitized_stderr + "\n" + sanitized_stdout
+            if _is_workflow_error(combined):
+                message = (
+                    "ERROR: Git push rejected by GitHub.\n"
+                    "  ! [remote rejected] ... (workflow scope)\n"
+                    "Your HTTPS token (gh auth token / GITHUB_TOKEN) lacks 'workflow' scope. GitHub blocks .github/workflows pushes for OAuth tokens.\n"
+                    "\n"
+                    "Choose one:\n"
+                    f"  1) gh auth refresh -h github.com -s workflow\n"
+                    f"     f2gh --source {source} --target {target}\n"
+                    f"  2) git remote add github git@github.com:{target}.git\n"
+                    f"     git push github --all\n"
+                    f"     git push github --tags\n"
+                    f"     f2gh --source {source} --target {target} --skip-git\n"
+                    "     Note: --all pushes only local branches. If some missing, run git fetch --all first.\n"
+                )
+                print(message, file=sys.stderr)
+                raise SystemExit(_ExitMessage(message))
+            else:
+                keywords = (
+                    "remote rejected",
+                    "gh007",
+                    "refusing",
+                    "workflow",
+                    "fatal",
+                    "error",
+                )
+                lines = combined.splitlines()
+                matching = [
+                    line for line in lines if any(k in line.lower() for k in keywords)
+                ]
+                if matching:
+                    snippet = matching[-1].strip()
+                else:
+                    non_empty = [line for line in lines if line.strip()]
+                    if non_empty:
+                        snippet = non_empty[-1].strip()
+                    elif sanitized_cmd.strip():
+                        snippet = sanitized_cmd.strip()
+                    else:
+                        snippet = "unknown error"
+                snippet = _redact_token(snippet, token)
+                msg = f"ERROR: Git push failed: {snippet}"
+                print(msg, file=sys.stderr)
+                raise SystemExit(_ExitMessage(msg))
+
+        try:
+            if not dry_run:
+                subprocess.run(
+                    ["git", "-C", tmpdir, "push", target_url, "--tags"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+        except subprocess.CalledProcessError as e:
+            sanitized_stderr = _redact_token(
+                e.stderr if isinstance(e.stderr, str) else None, token
+            )
+            sanitized_stdout = _redact_token(
+                e.stdout if isinstance(e.stdout, str) else None, token
+            )
+            cmd_str = (
+                " ".join(str(c) for c in e.cmd)
+                if isinstance(e.cmd, (list, tuple))
+                else (str(e.cmd) if e.cmd is not None else "")
+            )
+            sanitized_cmd = _redact_token(cmd_str, token)
+            _ = _redact_token(target_url, token)
+            combined = sanitized_stderr + "\n" + sanitized_stdout
+            if _is_workflow_error(combined):
+                message = (
+                    "ERROR: Git push rejected by GitHub.\n"
+                    "  ! [remote rejected] ... (workflow scope)\n"
+                    "Your HTTPS token (gh auth token / GITHUB_TOKEN) lacks 'workflow' scope. GitHub blocks .github/workflows pushes for OAuth tokens.\n"
+                    "\n"
+                    "Choose one:\n"
+                    f"  1) gh auth refresh -h github.com -s workflow\n"
+                    f"     f2gh --source {source} --target {target}\n"
+                    f"  2) git remote add github git@github.com:{target}.git\n"
+                    f"     git push github --all\n"
+                    f"     git push github --tags\n"
+                    f"     f2gh --source {source} --target {target} --skip-git\n"
+                    "     Note: --all pushes only local branches. If some missing, run git fetch --all first.\n"
+                )
+                print(message, file=sys.stderr)
+                raise SystemExit(_ExitMessage(message))
+            else:
+                keywords = (
+                    "remote rejected",
+                    "gh007",
+                    "refusing",
+                    "workflow",
+                    "fatal",
+                    "error",
+                )
+                lines = combined.splitlines()
+                matching = [
+                    line for line in lines if any(k in line.lower() for k in keywords)
+                ]
+                if matching:
+                    snippet = matching[-1].strip()
+                else:
+                    non_empty = [line for line in lines if line.strip()]
+                    if non_empty:
+                        snippet = non_empty[-1].strip()
+                    elif sanitized_cmd.strip():
+                        snippet = sanitized_cmd.strip()
+                    else:
+                        snippet = "unknown error"
+                snippet = _redact_token(snippet, token)
+                msg = f"ERROR: Git push failed (tags): {snippet}"
+                print(msg, file=sys.stderr)
+                raise SystemExit(_ExitMessage(msg))
 
         print("  Git push complete.")
     finally:
@@ -350,6 +553,8 @@ def migrate(
         "comments": 0,
         "failures": 0,
     }
+    errors: list[dict[str, object]] = []
+    git_error: str | None = None
 
     # --- Phase 1: Pre-flight & repo setup ---
     print(f"Checking target repo '{target}' on GitHub...")
@@ -406,9 +611,26 @@ def migrate(
     if not skip_git:
         if not git_pushed:
             if not dry_run:
-                mirror_git_repo(source, target, dry_run=False)
-                git_pushed = True
-                save_state(source, target, repo_created, git_pushed, migrated)
+                try:
+                    mirror_git_repo(source, target, dry_run=False)
+                    git_pushed = True
+                    save_state(source, target, repo_created, git_pushed, migrated)
+                except (
+                    SystemExit,
+                    subprocess.CalledProcessError,
+                    RuntimeError,
+                    requests.HTTPError,
+                    requests.ConnectionError,
+                    requests.Timeout,
+                    requests.RequestException,
+                ) as e:
+                    raw = str(e)[:500]
+                    try:
+                        _tok = get_github_token()
+                        git_error = _redact_token(raw, _tok)
+                    except SystemExit:
+                        git_error = raw
+                    print("  Git mirror failed — continuing to issue migration")
             else:
                 print("[DRY RUN] Would clone mirror from Codeberg and push to GitHub")
         else:
@@ -447,7 +669,27 @@ def migrate(
             print(f"[DRY RUN] Would create issue: '{title}'")
             print(f"  Labels: {labels}")
             print(f"  Body: {formatted_body[:120]}...")
-            comments = fetch_codeberg_comments(source, cb_index)
+            try:
+                comments = fetch_codeberg_comments(source, cb_index)
+            except (
+                requests.HTTPError,
+                requests.ConnectionError,
+                requests.Timeout,
+                RuntimeError,
+                KeyError,
+            ) as e:
+                stats["failures"] += 1
+                errors.append(
+                    {
+                        "cb_index": cb_index,
+                        "title": title,
+                        "step": "fetch_comments",
+                        "gh_number": None,
+                        "error": f"{type(e).__name__}: {e}",
+                    }
+                )
+                print(f"  FAILED [fetch_comments] CB #{cb_index} '{title}': {e}\n")
+                continue
             for comment in comments:
                 if comment.get("type") != "Comment":
                     continue
@@ -462,11 +704,16 @@ def migrate(
             continue
 
         print(f"Migrating Issue #{cb_index}: '{title}'...")
+        step: str = "create_issue"
+        gh_number: int | None = None
         try:
+            step = "create_issue"
             gh_issue = create_github_issue(target, title, formatted_body, labels)
-            gh_number: int = gh_issue["number"]
+            gh_number = gh_issue["number"]
+            assert isinstance(gh_number, int)
             time.sleep(0.3)
 
+            step = "fetch_comments"
             comments = fetch_codeberg_comments(source, cb_index)
             for comment in comments:
                 if comment.get("type") != "Comment":
@@ -476,11 +723,13 @@ def migrate(
                     comment["created_at"].split("T")[0],
                     comment.get("body"),
                 )
+                step = "create_comment"
                 create_github_comment(target, gh_number, formatted_comment)
                 stats["comments"] += 1
                 time.sleep(0.3)
 
             if state_str == "closed":
+                step = "close"
                 close_github_issue(target, gh_number)
                 time.sleep(0.3)
 
@@ -492,16 +741,26 @@ def migrate(
             requests.HTTPError,
             requests.ConnectionError,
             requests.Timeout,
+            RuntimeError,
             KeyError,
         ) as e:
             stats["failures"] += 1
-            print(f"  FAILED: {e}\n")
+            errors.append(
+                {
+                    "cb_index": cb_index,
+                    "title": title,
+                    "step": step,
+                    "gh_number": gh_number,
+                    "error": f"{type(e).__name__}: {e}",
+                }
+            )
+            print(f"  FAILED [{step}] CB #{cb_index} '{title}': {e}\n")
+            continue
 
     print(
         "\nMigration complete!"
         f"\n  Target repo: {target}"
         f"\n  Repo: {'created' if repo_created else 'existing'}"
-        f"\n  Git: {'pushed' if git_pushed else 'skipped'}"
         f"\n  Issues created: {stats['created']}"
     )
     if stats["skipped"]:
@@ -509,6 +768,54 @@ def migrate(
     print(f"  Comments posted: {stats['comments']}")
     if stats["failures"]:
         print(f"  Failures: {stats['failures']}")
+    if git_error:
+        print(f"  Git: FAILED — {git_error}")
+    else:
+        print(f"  Git: {'pushed' if git_pushed else 'skipped'}")
+    has_git_failure = git_error is not None
+    has_issue_failures = bool(errors) or stats["failures"] > 0
+    _cb_issues = locals().get("cb_issues", None)
+    is_empty_source = len(_cb_issues) == 0 if isinstance(_cb_issues, list) else False
+
+    if errors:
+        print("\n  Failed issues:")
+        print("    CB # | Title | Step | GH # | Error")
+        for err in errors:
+            _cb = err["cb_index"]
+            _title = str(err["title"])[:40]
+            _step = err["step"]
+            _gh = err["gh_number"] if err["gh_number"] is not None else "-"
+            _err = str(err["error"])[:80]
+            print(f"    {_cb} | {_title} | {_step} | {_gh} | {_err}")
+        print(
+            f"  State: {os.path.abspath(STATE_FILE)} ({len(migrated)} migrated, {len(errors)} failed)"
+        )
+        print(
+            f"  Resume: f2gh --source {source} --target {target}  # idempotent — re-runs only failed"
+        )
+        print(
+            f"  Resume: ./f2gh.py --source {source} --target {target}  # fallback without install"
+        )
+    else:
+        print(f"  State: {os.path.abspath(STATE_FILE)} ({len(migrated)} migrated)")
+
+    # Final outcome line - generic, not tied only to errors
+    if dry_run:
+        pass  # no success claim for dry-run, already printed dry-run lines
+    elif is_empty_source:
+        print("  No issues found to migrate.")
+    elif has_git_failure and has_issue_failures:
+        print(
+            f"  Migration incomplete: Git failed and {stats['failures']} issue(s) failed."
+        )
+    elif has_git_failure:
+        print("  Migration incomplete: Git failed.")
+    elif has_issue_failures:
+        print(f"  Migration incomplete: {stats['failures']} issue(s) failed.")
+    elif stats["created"] == 0 and stats["skipped"] == 0 and stats["failures"] == 0:
+        print("  Migration complete: nothing new to migrate.")
+    else:
+        print("  All issues migrated.")
 
 
 def main() -> None:
