@@ -43,9 +43,18 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
   - `ruff check .` and `mypy f2gh.py` for static analysis and type safety.
 - Test external API integrations using mocked responses (`responses` or `unittest.mock`) to avoid hitting live APIs during routine test suite runs.
 
+## 3. Planning and Issue Workflow
+
+- Keep active implementation plans in `plans/`, numbered in dependency order.
+- Identify each active plan's primary GitHub issue near the top of the plan; keep related issues under `References`.
+- Move completed plans to `plans/archive/` rather than deleting them.
+- Before closing a plan's issue, comment with the completing commit(s) and verification status.
+- Treat `plans/02-package-refactor-and-test-foundation.md` as the test and architecture foundation for later plans; do not implement later cross-cutting features in the monolithic script first.
+- Keep clone failures terminal; Git push failures may continue to issue migration; `--skip-git` is the explicit issue-only path.
+
 ---
 
-## 3. Key Commands Reference
+## 4. Key Commands Reference
 
 ```bash
 # Environment setup
