@@ -318,7 +318,39 @@ def mirror_git_repo(source: str, target: str, dry_run: bool) -> None:
                 else:
                     snippet = "unknown error"
             snippet = _redact_token(snippet, token)
-            msg = f"ERROR: Clone failed: {snippet}"
+            lower = combined.lower()
+            if "not found" in lower or "repository not found" in lower:
+                advice = (
+                    f"Verify that the Codeberg repository '{source}' exists "
+                    "and that the configured credentials can access it."
+                )
+            elif any(
+                phrase in lower
+                for phrase in (
+                    "authentication failed",
+                    "could not read username",
+                    "access denied",
+                    "permission denied",
+                )
+            ):
+                advice = (
+                    "Verify that CODEBERG_TOKEN is set and has access to the "
+                    "source repository."
+                )
+            elif any(
+                phrase in lower
+                for phrase in (
+                    "could not resolve host",
+                    "failed to connect",
+                    "connection timed out",
+                    "network is unreachable",
+                    "unable to access",
+                )
+            ):
+                advice = "Check your network connection and retry."
+            else:
+                advice = "Verify the source repository and retry."
+            msg = f"ERROR: Clone failed: {snippet}\n  {advice}"
             print(msg, file=sys.stderr)
             raise SystemExit(_ExitMessage(msg))
 
@@ -617,7 +649,6 @@ def migrate(
                     git_pushed = True
                     save_state(source, target, repo_created, git_pushed, migrated)
                 except (
-                    SystemExit,
                     subprocess.CalledProcessError,
                     RuntimeError,
                     requests.HTTPError,
@@ -641,6 +672,11 @@ def migrate(
                         git_error = _redact_token(short, _tok)
                     except SystemExit:
                         git_error = short
+                    print("  Git mirror failed — continuing to issue migration")
+                except SystemExit as e:
+                    if str(e).startswith("ERROR: Clone failed:"):
+                        raise
+                    git_error = "Git mirror failed"
                     print("  Git mirror failed — continuing to issue migration")
             else:
                 print("[DRY RUN] Would clone mirror from Codeberg and push to GitHub")
