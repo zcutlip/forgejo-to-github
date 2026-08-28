@@ -687,7 +687,37 @@ def migrate(
 
     # --- Phase 3: Issue migration ---
     print("\nFetching issues from Codeberg...")
-    cb_issues = fetch_all_codeberg_issues(source)
+    try:
+        cb_issues = fetch_all_codeberg_issues(source)
+    except requests.HTTPError as e:
+        status = (
+            e.response.status_code
+            if e.response is not None
+            and getattr(e.response, "status_code", None) is not None
+            else None
+        )
+        if status == 404:
+            msg = (
+                f"ERROR: Could not fetch issues from Codeberg: "
+                f"source repository '{source}' was not found (HTTP 404). "
+                f"Verify the source repository name and access."
+            )
+        else:
+            msg = (
+                f"ERROR: Could not fetch issues from Codeberg "
+                f"(HTTP {status if status is not None else 'error'}). "
+                f"Verify CODEBERG_TOKEN and the source repository, then retry."
+            )
+        print(msg, file=sys.stderr)
+        raise SystemExit(msg) from None
+    except (requests.ConnectionError, requests.Timeout) as e:
+        msg = (
+            f"ERROR: Could not fetch issues from Codeberg: "
+            f"network error ({type(e).__name__}). Check your network "
+            f"connection and retry."
+        )
+        print(msg, file=sys.stderr)
+        raise SystemExit(msg) from None
 
     new_issues = [i for i in cb_issues if i["number"] not in migrated]
     if len(new_issues) < len(cb_issues):
