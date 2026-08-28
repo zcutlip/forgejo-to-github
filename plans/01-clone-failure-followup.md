@@ -22,17 +22,25 @@ subprocess.CalledProcessError: Command '['git', 'clone', '--mirror', ...]' retur
 - Redacted tokens from clone and push errors before displaying them.
 - Added sanitized, actionable workflow-scope advice for push failures.
 - Kept temporary-directory cleanup in `finally`.
-- Made Git failure non-fatal to issue migration and included Git status in the final report.
+- Made Git push failure non-fatal to issue migration and included Git status in
+  the final report.
+- Treat clone failure as terminal because the source repository has not been
+  successfully validated; `--skip-git` remains the explicit issue-only path.
 - Prevented the final report from claiming migration success when Git failed.
+- Added clone-specific guidance for common network, authentication, and
+  repository-access failures.
 
 ## Existing session note #3
 
-Wrap `clone` in same redaction/workflow-advice pattern as `push`, make it non-fatal with `git_error` bucket, keep `state.json` deterministic.
+Wrap `clone` in the same redaction pattern as `push`, make clone failure
+terminal, and keep `state.json` deterministic.
 
 ## Remaining work
 
-- Verify clone failures with representative network/authentication errors and confirm the displayed message identifies the clone operation.
-- Refine clone-specific actionable guidance if needed; do not show workflow-scope advice for clone failures.
+- Verify clone failures with representative network/authentication errors and
+  confirm the displayed message identifies the clone operation and stops before
+  issue migration.
+- Do not show workflow-scope advice for clone failures.
 - Add automated tests for clone failure, push failure, token redaction, continuation to issue migration, and final status reporting.
 - Decide whether a failed or interrupted migration should retain a successful mirror for retry; see `plans/04-retain-clone-cache.md`.
 - Keep `state.json` deterministic.
