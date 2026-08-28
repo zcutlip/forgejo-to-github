@@ -104,17 +104,17 @@ def test_clone_failure_is_terminal_and_skips_issue_fetch():
         patch.object(f2gh, "check_target_repo", return_value=EXISTING_TARGET),
         patch.object(f2gh, "mirror_git_repo", side_effect=clone_failure),
         patch.object(f2gh, "fetch_all_codeberg_issues") as mock_fetch_issues,
+        pytest.raises(SystemExit) as exc_info,
     ):
-        with pytest.raises(SystemExit) as exc_info:
-            f2gh.migrate(
-                source="owner/source",
-                target="owner/target",
-                dry_run=False,
-                yes=True,
-                skip_git=False,
-                public=False,
-                description=None,
-            )
+        f2gh.migrate(
+            source="owner/source",
+            target="owner/target",
+            dry_run=False,
+            yes=True,
+            skip_git=False,
+            public=False,
+            description=None,
+        )
 
     assert "Clone failed" in str(exc_info.value.code)
     mock_fetch_issues.assert_not_called()
@@ -192,15 +192,15 @@ def test_successful_issues_are_checkpointed_and_resume_filters_them(capsys):
     def fake_create_issue(target, title, body, labels):
         return {"number": next(numbers)}
 
-    migrate_kwargs = dict(
-        source="owner/source",
-        target="owner/target",
-        dry_run=False,
-        yes=True,
-        skip_git=True,
-        public=False,
-        description=None,
-    )
+    migrate_kwargs = {
+        "source": "owner/source",
+        "target": "owner/target",
+        "dry_run": False,
+        "yes": True,
+        "skip_git": True,
+        "public": False,
+        "description": None,
+    }
 
     with (
         patch.object(f2gh, "check_target_repo", return_value=EXISTING_TARGET),
