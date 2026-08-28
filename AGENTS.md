@@ -38,8 +38,10 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
 - **Dependencies**: Keep external dependencies minimal (prefer standard library or light additions like `requests`).
 
 ### C. Testing & Verification Rules
+- This project uses a centralized virtualenv at `~/.virtualenvs/forgejo-to-github`. Do **not** create or activate a project-local `.venv`, and do **not** invoke `pytest` directly.
+- All tests **must** be run via `./scripts/run-tests.sh [pytest args...]`. The script handles virtualenv selection and activation, then passes all arguments through to `pytest`.
 - Before submitting PRs or finalizing changes, run:
-  - `pytest` for unit/integration test validation.
+  - `./scripts/run-tests.sh` for unit/integration test validation.
   - `ruff check .` and `mypy f2gh.py` for static analysis and type safety.
 - Test external API integrations using mocked responses (`responses` or `unittest.mock`) to avoid hitting live APIs during routine test suite runs.
 
@@ -67,16 +69,18 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
 ## 5. Key Commands Reference
 
 ```bash
-# Environment setup
-python -m venv .venv
-source .venv/bin/activate
+# Project virtualenv (managed centrally, do not create a project-local .venv)
+# Path: ~/.virtualenvs/forgejo-to-github
+# Run tests via the wrapper — it activates the venv and forwards args to pytest:
+./scripts/run-tests.sh
+
+# Editable install (one-time, inside the project virtualenv or via pipx)
 pip install -e .   # editable install → `f2gh` command (or `pipx install .`)
 
 # Run migration in dry-run mode
 f2gh --source owner/repo --target owner/repo --dry-run
 # (no-install fallback: ./f2gh.py --source owner/repo --target owner/repo --dry-run)
 
-# Run linter & tests
+# Run linter
 ruff check .
-pytest
 ```
