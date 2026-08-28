@@ -38,17 +38,17 @@ def test_migrate_source_404_exits_gracefully(capsys):
     with (
         patch.object(f2gh, "check_target_repo", return_value=existing_target),
         patch.object(f2gh, "fetch_all_codeberg_issues", side_effect=http_error),
+        pytest.raises(SystemExit) as exc_info,
     ):
-        with pytest.raises(SystemExit) as exc_info:
-            f2gh.migrate(
-                source="owner/missing",
-                target="owner/target",
-                dry_run=False,
-                yes=True,
-                skip_git=True,
-                public=False,
-                description=None,
-            )
+        f2gh.migrate(
+            source="owner/missing",
+            target="owner/target",
+            dry_run=False,
+            yes=True,
+            skip_git=True,
+            public=False,
+            description=None,
+        )
 
     # Exit code must be nonzero.
     code = exc_info.value.code
