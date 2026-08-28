@@ -43,7 +43,17 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
   - `ruff check .` and `mypy f2gh.py` for static analysis and type safety.
 - Test external API integrations using mocked responses (`responses` or `unittest.mock`) to avoid hitting live APIs during routine test suite runs.
 
-## 3. Planning and Issue Workflow
+## 3. Enforced Workflow
+
+- **Plan approval:** Code changes begin only after the user reviews/approves the plan. Developing a plan is not approval.
+- **TDD order:** Write tests first and establish RED, then implement to GREEN. Tests are the locked contract — never change tests to make an implementation pass.
+- **RED contract gaps:** If RED exposes a legitimate contract gap, stop and surface it. With user approval, amend the test, then stop again for user approval of the amended test before resuming GREEN.
+- **Stop gates:** User-held review checkpoints. After each substantive stage, stop for user review/approval. Final review and commit are performed by the user.
+- **No commits:** Unless you are the @commit agent, never commit, push, or stage-then-commit. Automated checks and delegate reports do not constitute user approval.
+- **Delegation tiers:** @lint and @commit are specialists and receive outcomes only — @commit is never without being explicitly directed by the user. @coder and @explore are generalists and may receive precise specifications.
+
+
+## 4. Planning and Issue Workflow
 
 - Keep active implementation plans in `plans/`, numbered in dependency order.
 - Identify each active plan's primary GitHub issue near the top of the plan; keep related issues under `References`.
@@ -54,7 +64,7 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
 
 ---
 
-## 4. Key Commands Reference
+## 5. Key Commands Reference
 
 ```bash
 # Environment setup
