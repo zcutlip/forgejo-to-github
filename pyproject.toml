@@ -18,6 +18,7 @@ f2gh = "f2gh:main"
 
 [tool.setuptools]
 py-modules = ["f2gh"]
+packages = ["forgejo_to_github"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -12,6 +12,11 @@ import time
 
 import requests
 
+from forgejo_to_github.formatting import (
+    format_comment_body,
+    format_issue_body,
+)
+
 CODEBERG_BASE = "https://codeberg.org/api/v1"
 CODEBERG_WEB = "https://codeberg.org"
 GITHUB_BASE = "https://api.github.com"
@@ -546,22 +551,6 @@ def close_github_issue(target: str, issue_number: int) -> None:
     """PATCH a GitHub issue to set its state to closed."""
     url = f"{GITHUB_BASE}/repos/{target}/issues/{issue_number}"
     gh_request("PATCH", url, json={"state": "closed"})
-
-
-def format_issue_body(
-    source: str, cb_index: int, author: str, date: str, body: str | None
-) -> str:
-    return (
-        f"> **Migrated from Codeberg** "
-        f"([Original Issue #{cb_index}]"
-        f"({CODEBERG_WEB}/{source}/issues/{cb_index}))\n"
-        f"> **Author:** @{author} | **Date:** {date}\n\n"
-        f"{body or ''}"
-    )
-
-
-def format_comment_body(author: str, date: str, body: str | None) -> str:
-    return f"> **@{author}** commented on {date}:\n\n{body or ''}"
 
 
 def migrate(
