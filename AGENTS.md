@@ -61,7 +61,10 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
 - Identify each active plan's primary GitHub issue near the top of the plan; keep related issues under `References`.
 - Move completed plans to `plans/archive/` rather than deleting them.
 - Before closing a plan's issue, comment with the completing commit(s) and verification status.
-- Treat `plans/02-package-refactor-and-test-foundation.md` as the test and architecture foundation for later plans; do not implement later cross-cutting features in the monolithic script first.
+- Treat `plans/02-package-refactor-and-test-foundation/` (the staged
+  refactor specification under `refactor/00-index.md`) as the test and
+  architecture foundation for later plans; do not implement later
+  cross-cutting features in the monolithic script first.
 - Keep clone failures terminal; Git push failures may continue to issue migration; `--skip-git` is the explicit issue-only path.
 
 ---

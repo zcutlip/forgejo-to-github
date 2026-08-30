@@ -1,6 +1,6 @@
 # Test framework specification
 
-**Plan:** [02-package-refactor-and-test-foundation](./02-package-refactor-and-test-foundation.md)
+**Plan:** [refactor/00-index.md](./refactor/00-index.md)
 **GitHub issue:** [#3](https://github.com/zcutlip/forgejo-to-github/issues/3)
 
 This document is the authoritative specification for the test framework that
@@ -55,6 +55,9 @@ credentials and no network access.
 
 - Python 3.12+ as the interpreter baseline. Tests must run under any
   supported 3.12+ interpreter without conditional skips for syntax.
+  This matches `pyproject.toml` (`requires-python = ">=3.12"`). The
+  master plan's mention of "3.10+" is editorial drift and is
+  corrected by the staged refactor spec.
 - External dependencies must remain minimal. Standard library first; the
   test suite may add only widely-used, lightweight packages that are
   already permitted by the existing tooling (e.g., `pytest`, `responses`,
@@ -235,21 +238,17 @@ and atomic persistence. Tests cover:
 ### 5.3 Checkpointing
 
 - After successfully creating an issue, the store records a checkpoint
-  with the source issue number, the new GitHub issue number, and the
-  timestamp.
-- After successfully creating an issue's first comment, the checkpoint
-  advances to include that comment.
-- After partially migrating an issue (some comments posted, others
-  failing), the checkpoint reflects the highest contiguous comment
-  index posted; later comments are retried on resume.
+  with the source issue number and the new GitHub issue number.
+  Per-issue `closed` state and per-comment progress are **not**
+  persisted in this plan; resume of a partially-completed issue
+  re-creates all comments and re-issues the close. This is the
+  approved simplification.
 - A checkpoint never advances for a step that did not succeed.
 
 ### 5.4 Resumption
 
 - On startup, the orchestrator reads the checkpoint and skips issues
   already migrated.
-- On startup, the orchestrator resumes an in-progress issue from the
-  recorded comment index.
 - If a checkpoint references a source issue that no longer exists on
   Codeberg, the orchestrator logs an explicit warning and skips it.
 - Resumption is deterministic: running the same migration twice against
@@ -305,8 +304,12 @@ The CLI is the public entry point. Tests cover:
 ### 7.1 Argument parsing
 
 - All existing flags parse: `--source`, `--target`, `--dry-run`,
-  `--skip-git`, `--state-file`, `--verbose`, and any additional flags
-  introduced during the refactor (added only with user approval).
+  `--skip-git`, `--yes`, `--public`, `--description`, and any
+  additional flags introduced during the refactor (added only with
+  user approval). The previous mention of `--state-file` is
+  editorial drift; that flag is not introduced in this plan. The
+  `--verbose` flag is also not part of the current CLI surface and
+  is not asserted here.
 - Source/target accept `owner/repo` form; bare names raise a structured
   parse error.
 - Conflicting flags (e.g., a future `--local-clone` and `--skip-git`)
@@ -339,6 +342,9 @@ The CLI is the public entry point. Tests cover:
   Tests assert that the destination file is unchanged after a dry-run
   that exits normally.
 - Dry-run still validates source and target arguments.
+- Dry-run always exits 0 regardless of underlying state. The reporter
+  emits a dry-run summary that does not claim "migrated" or
+  "complete" and does not enumerate failures.
 
 ## 8. Repository-description tests
 
@@ -586,8 +592,10 @@ documented contract.
 - The final summary includes: total issues, migrated, failed, total
   comments, posted, failed, and the elapsed time (which is
   injectable).
-- The final summary is written to stdout on success and to stderr on
-  failure. The test asserts both code paths.
+- The final summary is written to the normal-output sink on success
+  and to the error-output sink on any failure. The reporter's
+  dual-sink design (one for normal output, one for error output)
+  is exercised in `tests/test_reporting.py::test_reporter_writes_failure_summary_to_error_sink`.
 
 ### 13.3 Exit-code mapping
 
@@ -646,12 +654,14 @@ provides).
   reporter are all instantiable with explicit constructor arguments
   for their dependencies. The test instantiates each with a fake
   dependency and asserts construction succeeds.
-- No class imports a transport (`requests`), a subprocess module
-  (`subprocess`), or the file system (`os`, `pathlib`) at module
-  scope when that import is only used to perform side effects. Such
-  imports must be encapsulated behind an injected seam. The test
-  asserts that monkey-patching `requests.post` does not change the
-  behavior of an injected client.
+- No class performs network, subprocess, or filesystem I/O at module
+  import time. Imports of `requests`, `subprocess`, `os`, `pathlib`,
+  and similar modules are permitted for later use, but the import
+  statement must not trigger any side effect. Such side effects must
+  be encapsulated behind an injected seam. The test asserts that
+  monkey-patching `requests.post` does not change the behavior of
+  an injected client, and that importing the package does not
+  perform any I/O.
 
 ### 14.4 Module boundaries
 
@@ -659,8 +669,9 @@ provides).
   directly. The test asserts the import graph.
 - The orchestrator imports the API clients and Git service but does
   not import `requests` or `subprocess` directly.
-- The reporter does not import any I/O module; it consumes already-
-  formatted strings.
+- The reporter may import `sys` for the default sinks; it does not
+  import `requests`, `subprocess`, or `argparse`. It consumes
+  already-formatted strings from the orchestrator.
 
 ### 14.5 No god object
 
@@ -831,7 +842,7 @@ This plan is complete when:
 
 ## 19. References
 
-- Plan: [02-package-refactor-and-test-foundation.md](./02-package-refactor-and-test-foundation.md)
+- Plan index: [refactor/00-index.md](./refactor/00-index.md)
 - Issue: [#3](https://github.com/zcutlip/forgejo-to-github/issues/3)
 - Predecessor plan: [../01-clone-failure-followup.md](../01-clone-failure-followup.md)
 - Project guidelines: [../../AGENTS.md](../../AGENTS.md)

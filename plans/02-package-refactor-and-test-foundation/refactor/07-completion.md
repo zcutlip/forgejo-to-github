@@ -16,11 +16,9 @@ verifies, records, and archives.
 
 This stage writes to:
 
-- `plans/02-package-refactor-and-test-foundation/02-package-refactor-and-test-foundation.md` — left in place (not modified).
 - `plans/02-package-refactor-and-test-foundation/test-framework-spec.md` — left in place.
 - `plans/02-package-refactor-and-test-foundation/refactor/00-index.md` through `07-completion.md` — left in place for historical reference.
-- `plans/archive/02-package-refactor-and-test-foundation.md` — the master plan is moved here.
-- `plans/archive/02-package-refactor-and-test-foundation/` — the supporting directory (containing `test-framework-spec.md` and `refactor/`) is moved here.
+- `plans/archive/02-package-refactor-and-test-foundation/` — the entire plan directory (containing `test-framework-spec.md` and `refactor/`) is moved here.
 
 This stage does not modify source code.
 
@@ -38,20 +36,23 @@ the plan can be closed.
 | 4 | `ruff check .` is clean | `ruff check .` exits 0 | master plan §Completion criteria |
 | 5 | `mypy f2gh.py forgejo_to_github/` is clean | `mypy f2gh.py forgejo_to_github/` exits 0 (or reports no errors on the listed paths) | master plan §Completion criteria |
 | 6 | Public CLI surface preserved | `./scripts/run-tests.sh tests/test_cli.py tests/test_characterization.py` exits 0 | master plan §Completion criteria |
-| 7 | Each public class has a docstring | `tests/test_package_boundaries.py::test_public_class_has_docstring` passes for all six classes | test framework spec §14.2 |
-| 8 | Each public class has 2–7 public methods | `tests/test_package_boundaries.py::test_public_class_has_at_least_two_public_methods` and `test_public_class_has_at_most_seven_public_methods` pass | test framework spec §14.5 |
+| 7 | Each public class has a docstring | `tests/test_package_boundaries.py::test_public_class_has_docstring` passes for all six classes (`StateStore`, `CodebergClient`, `GitHubClient`, `GitMirror`, `MigrationOrchestrator`, `Reporter`) | test framework spec §14.2 |
+| 8 | Each public class has 2–7 public methods | `tests/test_package_boundaries.py::test_public_class_has_at_least_two_public_methods` and `test_public_class_has_at_most_seven_public_methods` pass for all six classes | test framework spec §14.5 |
 | 9 | No proxy classes | Manual inspection of the diff; no class has a single public method that simply delegates; `forgejo_to_github.formatting` remains functions, not a class | test framework spec §14.1 |
 | 10 | Migration semantics preserved (clone terminal, push non-fatal) | `tests/test_orchestration.py::test_clone_failure_is_terminal_and_skips_issue_migration`, `tests/test_orchestration.py::test_push_failure_does_not_block_issue_migration`, `tests/test_migration_reporting.py::test_git_push_failure_is_non_fatal_and_reported`, `tests/test_git_service.py::test_clone_failure_is_terminal_no_github_api_call_after` all pass | master plan §Goals; test framework spec §11.6 |
 | 11 | Per-issue substep ordering preserved | `tests/test_orchestration.py::test_create_issue_runs_before_comments_and_checkpoint` passes | test framework spec §12.1, §12.2 |
 | 12 | Resume semantics preserved | `tests/test_migration_reporting.py::test_successful_issues_are_checkpointed_and_resume_filters_them` passes | test framework spec §12.3 |
 | 13 | Truthful reporting preserved | `tests/test_reporting.py::test_result_with_failure_does_not_claim_all_migrated`, `tests/test_migration_reporting.py::test_issue_failure_is_accumulated_and_later_issues_continue` pass | test framework spec §13.4 |
-| 14 | Token redaction preserved at every boundary | `tests/test_codeberg_client.py::test_transport_error_does_not_leak_token`, `tests/test_git_service.py::test_clone_stderr_token_is_redacted_in_error_text`, `tests/test_git_service.py::test_url_token_is_redacted_in_logged_command`, `tests/test_git_service.py::test_extra_header_token_is_redacted_in_command`, `tests/test_git_service.py::test_tag_name_containing_token_is_redacted` all pass | master plan §Design constraints; test framework spec §10.6, §11.4 |
+| 14 | Token redaction preserved at every boundary | `tests/test_codeberg_client.py::test_transport_error_does_not_leak_token`, `tests/test_git_service.py::test_clone_stderr_token_is_redacted_in_error_text`, `tests/test_git_service.py::test_url_token_is_redacted_in_logged_command`, `tests/test_git_service.py::test_extra_header_token_is_redacted_in_command` all pass | master plan §Design constraints; test framework spec §10.6, §11.4 |
 | 15 | Atomic state writes preserved | `tests/test_state_store.py::test_save_calls_os_replace_for_atomic_write`, `test_save_persists_all_fields_and_uses_atomic_replace` pass | master plan §Goals; test framework spec §5.2 |
 | 16 | `--skip-git`, `--dry-run`, source/target flags preserved | `tests/test_characterization.py::test_parse_args_*_flag` and `tests/test_cli.py::test_help_lists_documented_optional_flags` pass | master plan §Design constraints |
 | 17 | Pre-commit configuration unchanged | `git diff .pre-commit-config.yaml` is empty; the file has not been modified during the refactor | master plan §Design constraints |
 | 18 | `f2gh` console-script entry point still resolves | `python -c "import f2gh; assert callable(f2gh.main)"` exits 0; `pyproject.toml` is unchanged | master plan §Work sequence |
 | 19 | Orchestrator constructs no collaborators of its own | `tests/test_orchestration.py::test_orchestrator_constructor_accepts_injected_dependencies` passes; `forgejo_to_github/migration.py` does not call `CodebergClient(...)`, `GitHubClient(...)`, `GitMirror(...)`, `StateStore(...)`, or `Reporter(...)` constructors | stage 04 invariants; binding decisions |
-| 20 | Domain types are plain dataclasses, not pydantic | `forgejo_to_github/migration.py` and `forgejo_to_github/state.py` import `dataclasses`, not `pydantic`; `MigrationState` and `MigrationResult` are `@dataclass` | binding decisions |
+| 20 | Domain types are plain dataclasses, not pydantic | `forgejo_to_github/migration.py` and `forgejo_to_github/state.py` import `dataclasses`, not `pydantic`; `MigrationState`, `IssueCheckpoint`, `Repository`, `MigrationResult`, and `IssueFailure` are `@dataclass` | binding decisions |
+| 21 | Dry-run exits 0 and makes no network or subprocess calls | `tests/test_orchestration.py::test_dry_run_makes_no_http_or_subprocess_calls` and `test_dry_run_does_not_write_state` pass; `tests/test_reporting.py::test_dry_run_summary_does_not_claim_migrated` passes | `00-index.md` dry-run decision; stage 04 §3.2 step 1; stage 05 §3.4 rule 6 |
+| 22 | Reporter writes failure summaries to error sink | `tests/test_reporting.py::test_reporter_writes_failure_summary_to_error_sink` passes | stage 05 §3.4 rule 7 |
+| 23 | Acceptance of partial-failure comments is documented behavior | Manual inspection of stage 04 §3.4 confirms the S3 per-comment-failure rule; the corresponding test, if added in stage 04, passes | stage 04 §3.4 |
 
 ## 4. Issue closure protocol
 

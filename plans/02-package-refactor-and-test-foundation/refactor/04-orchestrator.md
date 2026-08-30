@@ -1,30 +1,34 @@
 # Stage 04 — `MigrationOrchestrator`
 
 **Parent stage:** [`00-index.md`](./00-index.md)
-**Depends on:** stage 01 (`StateStore`, `MigrationState`), stage 02
-(`CodebergClient`, `GitHubClient`), stage 03 (`GitMirror`).
-**Blocks:** stage 05 (reporter), stage 06 (CLI wiring).
+**Depends on:** stage 01 (`StateStore`, `MigrationState`,
+`IssueCheckpoint`), stage 02 (`CodebergClient`, `GitHubClient`), stage
+03 (`GitMirror`), stage 05 (`Reporter`).
+**Blocks:** stage 06 (CLI wiring).
 
 ## 1. Objective
 
 Introduce `forgejo_to_github.migration.MigrationOrchestrator`. This
 class is the only piece of the package that knows the order of phases
 and the per-issue substep sequence. It is constructed by injecting
-exactly five collaborators and performs no network or subprocess work
-of its own.
+exactly five collaborators (plus the `Repository` value object) and
+performs no network or subprocess work of its own.
 
 The orchestrator is also the home of the `MigrationResult` dataclass
-that the reporter consumes. The result is a plain `@dataclass`, not
-a pydantic model, not a `dict`.
+and the `Repository` dataclass. The result is a plain `@dataclass`, not
+a pydantic model, not a `dict`. The orchestrator returns the result;
+the CLI is responsible for calling `reporter.render_final(result)` and
+translating the result into an exit code.
 
 ## 2. Files / modules
 
 - **New module:** `forgejo_to_github/migration.py` containing:
   - `MigrationOrchestrator` class.
   - `MigrationResult` dataclass.
-  - Optional small helpers (e.g., a `Repository` dataclass holding
-    `source`, `target`, and the optional `description`). No proxy
-    classes. No factory methods that build collaborators.
+  - `Repository` frozen dataclass.
+  - `IssueFailure` dataclass.
+  - Optional small helpers (e.g., a label-default-color constant).
+    No proxy classes. No factory methods that build collaborators.
 
 - `forgejo_to_github/__init__.py` is not modified during this stage.
 
@@ -46,9 +50,9 @@ MigrationOrchestrator(
 )
 ```
 
-The test builds the orchestrator with these exact keyword arguments:
-`repo=`, `api=` (renamed to `codeberg=` and `github=` — see naming
-note below), `git=`, `state=`, `report=` (renamed to `reporter=`).
+The constructor takes one frozen value object (`repo`) and five
+collaborators. The five collaborators are `codeberg`, `github`, `git`,
+`state`, and `reporter`. `repo` is configuration, not a collaborator.
 
 **Naming reconciliation with the existing test fixture.** The test
 fixture in `tests/test_orchestration.py` passes a single `api=` seam
@@ -63,6 +67,8 @@ fixture (`_FakeApi`) **only by separating it into `_FakeCodeberg` and
 test names and assertions remain unchanged. Specifically:
 
 - `_FakeCodeberg.list_issues` returns the configured issues list.
+- `_FakeCodeberg.list_comments` returns the configured comments for an
+  issue.
 - `_FakeGitHub.create_issue` and `_FakeGitHub.create_comment` are the
   existing fake methods, unchanged.
 - The orchestrator is constructed with `codeberg=_FakeCodeberg(...),
@@ -80,26 +86,36 @@ def run(self) -> MigrationResult: ...
 
 Top-level orchestration entry point. Performs these phases in order:
 
-1. **Pre-flight.** If `self.repo.target` does not yet exist on
+1. **Dry-run short-circuit.** If `self.repo.dry_run` is `True`, skip
+   all phases 2–5 and produce a `MigrationResult` whose `git["clone"]`
+   and `git["push"]` are both `"skipped"`, whose failure lists are
+   empty, and whose counters are zero. The reporter is **not** called
+   during a dry-run. The CLI is responsible for emitting the dry-run
+   final summary (see stage 06 for the dry-run wording rules).
+2. **Pre-flight.** If `self.repo.target` does not yet exist on
    GitHub, fetch the source repository description (via
    `codeberg.get_repository_description()`) when no explicit
    `description` was provided, and create the target repository via
    `github.create_repository(...)`. On HTTP failure of the description
-   fetch, fall back to `"Migrated from Codeberg"`.
-2. **Repository description update.** If a non-empty description was
+   fetch, log a one-line warning and fall back to `"Migrated from
+   Codeberg"`. The fallback is the **orchestrator's** responsibility,
+   not the client's; `codeberg.get_repository_description()` always
+   returns a string (empty on missing or HTTP error, but the client
+   raises on HTTP error; the orchestrator catches and falls back).
+3. **Repository description update.** If a non-empty description was
    supplied explicitly, call `github.update_repository_description(...)`
    immediately after repository creation.
-3. **Git mirror.** If `self.repo.skip_git` is `False`, call
-   `git.clone()` and then `git.push_branches(...)` /
-   `git.push_tags(...)`. On clone failure, raise (terminal). On push
-   failure, record the failure but proceed to issue migration.
+4. **Git mirror.** If `self.repo.skip_git` is `False`, call
+   `git.clone()` and then `git.push_branches(local_path)` /
+   `git.push_tags(local_path)`. On clone failure, raise (terminal). On
+   push failure, record the failure but proceed to issue migration.
    On success, advance the state via `state.save(...)` and call
    `git.cleanup(local_path)` in a `finally`.
-4. **Issue migration.**
+5. **Issue migration.**
    - `state.load()` to obtain the `MigrationState`.
    - `codeberg.list_issues()` to enumerate.
-   - For each issue whose number is not in `state.migrated`:
-     - `reporter.issue_started(source_number=...)`.
+   - For each issue whose `number` is not in `state.migrated`:
+     - `reporter.issue_started(source_number=..., total=...)`.
      - `github.create_issue(...)`.
      - For each comment from `codeberg.list_comments(issue_id=...)`:
        - `github.create_comment(...)`.
@@ -109,9 +125,10 @@ Top-level orchestration entry point. Performs these phases in order:
    - On per-issue failure, accumulate the failure into
      `MigrationResult.failures` and continue to the next issue. Do not
      raise.
-5. **Final summary.** `reporter.render_final(result)` is invoked once.
-6. **Return the result.** The orchestrator does not exit. Exit-code
-   translation is the CLI's responsibility (stage 06).
+6. **Return the result.** The orchestrator does not call
+   `reporter.render_final` and does not exit. The CLI is responsible
+   for calling `reporter.render_final(result)` and
+   `sys.exit(reporter.exit_outcome(result))`.
 
 ### 3.3 Per-issue dependency rules
 
@@ -126,7 +143,48 @@ Top-level orchestration entry point. Performs these phases in order:
   `migrated` mapping that includes the just-succeeded issue. A failed
   issue never advances the checkpoint.
 
-### 3.4 Clone-vs-push terminal/non-fatal classification
+### 3.4 Per-issue state machine
+
+For each source issue, the orchestrator transitions through these
+states. The state is local to one issue; it does not appear on the
+`MigrationResult` directly.
+
+| Step | Event | On success | On failure |
+|------|-------|-----------|-----------|
+| S1 | `reporter.issue_started` | → S2 | n/a (this is reporting) |
+| S2 | `github.create_issue` | → S3 | → S6 (record failure, mark issue as failed) |
+| S3 | for each comment: `github.create_comment` | → S4 | continue to S4; comment count is recorded |
+| S4 | if closed: `github.close_issue` | → S5 | continue to S5; the close is treated as a warning, not a hard failure (the issue is migrated; the close is the last step) |
+| S5 | `state.save` then `reporter.issue_succeeded` | → next issue | n/a |
+| S6 | accumulate into `MigrationResult.failures` | → next issue | n/a |
+
+The four "issue-succeeded" / "issue-failed" mappings to
+`MigrationResult` counters:
+
+| Counter | Increment when |
+|---------|---------------|
+| `issues_attempted` | S1 begins for this issue |
+| `issues_succeeded` | S5 completes for this issue |
+| `issues_failed` | S6 records a failure (i.e., S2 failed) |
+| `comments_attempted` | S3 begins for each comment |
+| `comments_succeeded` | S3 completes for each comment (per comment) |
+| `comments_failed` | S3 records a per-comment failure (per comment) |
+
+A comment that fails but is followed by successful comments: only
+failing comments count toward `comments_failed`. The checkpoint is
+still advanced to the full issue (because `closed` and the GitHub
+issue number are both recorded). Resuming this issue re-creates all
+comments and re-issues the close (per `01-state-store.md` §3.1). This
+is the approved simplification.
+
+A close that fails (S4) is recorded as a structured
+`IssueFailure` entry whose `kind` is `"close_failed"`. The issue
+itself is counted as succeeded (S5 still runs), and the close
+failure is one entry in `failures`. The reporter surfaces the close
+failure concisely in the final summary. This is the approved
+behavior for this plan.
+
+### 3.5 Clone-vs-push terminal/non-fatal classification
 
 - **`git.clone()` failure is terminal.** The orchestrator must not
   proceed to issue migration. The test
@@ -134,42 +192,21 @@ Top-level orchestration entry point. Performs these phases in order:
   that no `create_issue` call is recorded on the GitHub seam and that
   no checkpoint is recorded.
 - **`git.push_branches(...)` failure is non-fatal.** The orchestrator
-  logs the failure via `reporter.git_phase_finished(...)` and
-  continues to issue migration. The result exposes `push_status`
-  set to something other than `"ok"` so the reporter can name it.
+  records `git["push"] = "failed"`, logs the failure via
+  `reporter.git_phase_finished("failed")`, and continues to
+  `git.push_tags(...)` and then to issue migration. The result
+  exposes `push_status` set to `"failed"` so the reporter can name it.
   Test `test_push_failure_does_not_block_issue_migration`.
 - **`git.push_tags(...)` failure is non-fatal for the same reasons.**
+  `git["push"]` is set to `"failed"` (overwriting the prior value if
+  the branch push also failed). `reporter.git_phase_finished("failed")`
+  is invoked once at the end of the Git phase.
 - **Cleanup.** `git.cleanup(local_path)` is called from the Git phase
   in a `finally`. The cleanup call survives push failure.
 
-### 3.5 `MigrationResult`
-
-Plain `@dataclass` (not frozen; the orchestrator constructs it
-incrementally during the run, then returns it).
-
-Fields (these names are part of the contract asserted by
-`tests/test_orchestration.py` and `tests/test_reporting.py`):
-
-| Field | Type | Notes |
-|-------|------|-------|
-| `issues_attempted` | `int` | Number of issues the orchestrator entered. |
-| `issues_succeeded` | `int` | Number of issues created successfully. |
-| `issues_failed` | `int` | Number of issues whose create failed. |
-| `comments_attempted` | `int` | Total comments across all attempted issues. |
-| `comments_succeeded` | `int` | Total comments posted successfully. |
-| `comments_failed` | `int` | Total comments that failed. |
-| `git` | `dict[str, str]` | `{"clone": "...", "push": "..."}`. Values are one of `"ok"`, `"failed"`, `"skipped"`. |
-| `failures` | `list[dict]` | Each entry has at minimum `{"kind": str, "source_number": int, "message": str}`. |
-| `clone_status` | `str` | Convenience alias for `git["clone"]`; some tests reach for it. |
-
-The `MigrationResult` is consumed by the reporter (stage 05). It is
-not formatted by the orchestrator; the orchestrator does not import
-`forgejo_to_github.reporting` for this purpose (only the type, if at
-all).
-
 ### 3.6 `Repository`
 
-Tiny `@dataclass` to carry the immutable per-run inputs:
+Frozen `@dataclass` to carry the immutable per-run inputs:
 
 ```python
 @dataclass(frozen=True)
@@ -188,12 +225,59 @@ accessor methods Python dataclasses generate. It exists so that the
 orchestrator's constructor takes one `repo=` argument instead of a
 long parameter list. The CLI builds it from `argparse.Namespace`.
 
-### 3.7 No factory method
+### 3.7 `MigrationResult`
+
+Plain `@dataclass` (not frozen; the orchestrator constructs it
+incrementally during the run, then returns it).
+
+Fields (these names are part of the contract asserted by
+`tests/test_orchestration.py` and `tests/test_reporting.py`):
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `issues_attempted` | `int` | Number of issues the orchestrator entered. |
+| `issues_succeeded` | `int` | Number of issues created successfully. |
+| `issues_failed` | `int` | Number of issues whose create failed. |
+| `comments_attempted` | `int` | Total comments across all attempted issues. |
+| `comments_succeeded` | `int` | Total comments posted successfully. |
+| `comments_failed` | `int` | Total comments that failed. |
+| `git` | `dict[str, str]` | `{"clone": "...", "push": "..."}`. Values are one of `"ok"`, `"failed"`, `"skipped"`. `"skipped"` means the phase was not attempted (either `--skip-git` or `--dry-run`). |
+| `failures` | `list[IssueFailure]` | Per-issue structured failures. See §3.8. |
+| `clone_status` | `str` | Convenience alias for `git["clone"]`; some tests reach for it. |
+| `push_status` | `str` | Convenience alias for `git["push"]`; some tests reach for it. |
+| `dry_run` | `bool` | True when `repo.dry_run` was set; included for reporter clarity. |
+
+### 3.8 `IssueFailure`
+
+Plain `@dataclass`:
+
+```python
+@dataclass
+class IssueFailure:
+    kind: str            # "issue_create", "comment", "close_failed", "label_create", or other structured kind
+    source_number: int
+    message: str         # redaction-safe; the orchestrator does not include the token
+    step: str            # "create", "comment", "close", "label"; finer-grained than kind
+```
+
+`MigrationResult.failures` is `list[IssueFailure]`. The reporter and
+tests that look for `{"kind": str, "source_number": int, "message": str}`
+in failures continue to find those keys via attribute access. The
+dataclass preserves the field names.
+
+### 3.9 No factory method
 
 The orchestrator does **not** provide a `build(...)` classmethod or
 `from_args(...)` constructor. The CLI is the only place that
 constructs concrete collaborators. The reporter and clients are not
 instantiated by the orchestrator.
+
+### 3.10 Label color defaulting
+
+The orchestrator owns the documented label color default
+(`DEFAULT_LABEL_COLOR = "ededed"`). When the source label lacks a
+color, the orchestrator substitutes this default before calling
+`github.ensure_label(...)`. The client does not default the color.
 
 ## 4. Invariants
 
@@ -217,6 +301,8 @@ instantiated by the orchestrator.
   containing an embedded token. The token is consumed inside
   `GitMirror.push_branches(...)` / `push_tags(...)`, which already
   redacts.
+- **The orchestrator does not call `reporter.render_final`.** The
+  CLI is the single owner of the final summary emission.
 
 ## 5. Collaborator / dependency rules
 
@@ -294,11 +380,21 @@ implementing agent adds them after RED review):
   via the existing `tests/test_orchestration.py::test_create_issue_runs_before_comments_and_checkpoint`,
   which is sufficient to pin the ordering. A dedicated test is
   optional.
+- `test_resume_skips_issues_already_in_state` — verifies that the
+  orchestrator skips issues whose number is in `state.migrated`.
+- `test_result_aggregates_counts_for_reporter` — verifies the four
+  counter fields and `git["clone"]` / `git["push"]` map to the
+  reporter's expectations.
+- `test_dry_run_makes_no_http_or_subprocess_calls` — verifies that
+  the fake transport and fake command runner are not called during
+  a dry-run.
+- `test_dry_run_does_not_write_state` — verifies that
+  `StateStore.save` is not called during a dry-run.
 
 ## 8. Implementation order
 
 1. Add `forgejo_to_github/migration.py` with `Repository`,
-   `MigrationResult`, and `MigrationOrchestrator`.
+   `IssueFailure`, `MigrationResult`, and `MigrationOrchestrator`.
 2. Update `tests/test_orchestration.py`'s `_FakeApi` fixture into
    `_FakeCodeberg` / `_FakeGitHub` (or keep `_FakeApi` and pass the
    same instance to both `codeberg=` and `github=` if its surface is
@@ -351,3 +447,6 @@ The user reviews before stage 05 begins.
   `plans/03-keyboard-interrupt-handling.md`.
 - Clone cache retention. That is `plans/04-retain-clone-cache.md`.
 - Local-clone mode. That is `plans/05-local-clone-invocation.md`.
+- Persisting comment progress or `closed` per issue. See
+  `01-state-store.md` §3.1; this is a deliberate simplification
+  approved at spec review.

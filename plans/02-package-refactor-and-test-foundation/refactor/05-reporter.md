@@ -1,7 +1,7 @@
 # Stage 05 — Reporter
 
 **Parent stage:** [`00-index.md`](./00-index.md)
-**Depends on:** stage 04 (`MigrationResult`).
+**Depends on:** stage 04 (`MigrationResult`, `IssueFailure`).
 **Blocks:** stage 06 (CLI wiring).
 
 ## 1. Objective
@@ -15,15 +15,19 @@ during the run.
 
 The reporter's responsibilities are:
 
-- Accept an injected output `Sink` (Protocol) so tests can capture
-  output without touching `sys.stdout`.
-- Default the output sink to a thin wrapper around `sys.stdout`.
-- Render progress events handed to it by the orchestrator.
+- Accept two injected output `Sink` Protocols (one for normal output,
+  one for error output) so tests can capture output without touching
+  `sys.stdout` or `sys.stderr`.
+- Default the normal-output sink to a thin wrapper around
+  `sys.stdout` and the error-output sink to a thin wrapper around
+  `sys.stderr`.
+- Render progress events handed to it by the orchestrator. The
+  reporter decides which sink to use per event.
 - Render a final summary that:
   - Reports the issue and comment counts truthfully.
   - Names every failure exactly once.
   - Distinguishes complete success from partial failure from terminal
-    failure.
+    failure from dry-run.
   - Surfaces a Git push failure concisely, **without** replaying the
     full multi-line advisory block.
   - Surfaces a Git clone failure by name.
@@ -36,7 +40,7 @@ The reporter's responsibilities are:
 
 - **New module:** `forgejo_to_github/reporting.py` containing:
   - `Sink` Protocol.
-  - `StdoutSink` default implementation.
+  - `StdoutSink` and `StderrSink` default implementations.
   - `Reporter` class.
   - Module-private constants for exit codes (named, not magic numbers).
 
@@ -55,8 +59,9 @@ A sink is anything with a `write(line: str) -> None` method. The test
 fixture in `tests/test_reporting.py` is a `_Sink` class with that exact
 signature plus a `text()` accessor.
 
-The default sink writes each line followed by a single newline to
-`sys.stdout`. Internally:
+The default normal sink writes each line followed by a single newline
+to `sys.stdout`. The default error sink writes each line followed by a
+single newline to `sys.stderr`. Internally:
 
 ```python
 class StdoutSink:
@@ -65,29 +70,46 @@ class StdoutSink:
 
     def write(self, line: str) -> None:
         self._stream.write(line + "\n")
+
+
+class StderrSink:
+    def __init__(self, stream=None) -> None:
+        self._stream = stream if stream is not None else sys.stderr
+
+    def write(self, line: str) -> None:
+        self._stream.write(line + "\n")
 ```
 
-`Reporter` accepts an `output: Sink | None = None` argument. When
-`None`, the constructor instantiates `StdoutSink()`.
+`Reporter` accepts `output: Sink | None = None` and
+`error_output: Sink | None = None` arguments. When `None`, the
+constructor instantiates `StdoutSink()` / `StderrSink()` respectively.
 
 ### 3.2 `Reporter`
 
 Constructor:
 
 ```python
-Reporter(output: Sink | None = None)
+Reporter(output: Sink | None = None, error_output: Sink | None = None)
 ```
 
 Methods:
 
-| Method | Purpose |
-|--------|---------|
-| `issue_started(source_number: int)` | Emit a "Migrating Issue #N ..." progress line. |
-| `issue_succeeded(source_number: int, github_number: int)` | Emit a "Successfully created GitHub Issue #M" line. |
-| `issue_failed(source_number: int, reason: str)` | Emit a "FAILED [step] CB #N 'title': reason" line. |
-| `git_phase_finished(status: str)` | Emit a one-line summary of the Git phase. |
-| `render_final(result: MigrationResult)` | Emit the final summary. Idempotent in that calling it twice yields two full summaries (the CLI calls it exactly once). |
-| `exit_outcome(result: MigrationResult) -> int` | Return 0 on complete success, the documented "incomplete" code on partial failure, the documented "failure" code on terminal failure. The CLI maps this to `sys.exit`. |
+| Method | Sink | Purpose |
+|--------|------|---------|
+| `run_started(total: int)` | `output` | Emit a "Starting migration of N issues" line. |
+| `issue_started(source_number: int, total: int)` | `output` | Emit a "Migrating Issue #N" line. The `total` argument is the number of issues to migrate in this run, used for the `N/M` progress format. |
+| `issue_succeeded(source_number: int, github_number: int)` | `output` | Emit a "Created issue #M on GitHub" line. |
+| `issue_failed(source_number: int, kind: str, message: str)` | `error_output` | Emit a "FAILED [kind] CB #N: message" line. |
+| `git_phase_finished(status: str)` | `output` or `error_output` based on status | Emit a one-line summary of the Git phase. `"failed"` routes to `error_output`; `"ok"` and `"skipped"` route to `output`. |
+| `render_final(result: MigrationResult)` | both sinks, mixed based on success/failure | Emit the final summary. Idempotent in that calling it twice yields two full summaries (the CLI calls it exactly once). The summary header and counters go to `output`; failure listings and advisory-named lines go to `error_output`. |
+| `exit_outcome(result: MigrationResult) -> int` | n/a | Return 0 on complete success, the documented "incomplete" code on partial failure, the documented "failure" code on terminal failure, and 0 on dry-run regardless of underlying state. The CLI maps this to `sys.exit`. |
+
+The `issue_failed` method receives a structured `kind` (e.g.,
+`"issue_create"`, `"comment"`, `"close_failed"`) and a `message`.
+The reporter formats them into the failure line. The reporter
+**does not** receive the title (titles are not preserved in the
+failure path; the legacy code logged them but they were inconsistently
+populated and this is a deliberate cleanup).
 
 ### 3.3 Exit-code constants
 
@@ -99,14 +121,19 @@ EXIT_INCOMPLETE: int = 1
 EXIT_FAILURE: int = 2
 ```
 
-(The exact values are chosen here for the spec; if the existing
-`f2gh.migrate` user-facing flow already implies different codes —
-which it does not, since `migrate` raises `SystemExit(_ExitMessage(msg))`
-whose exit code is `_ExitMessage` and compares == 1 — the implementing
-agent should still propose these constants and stop for approval if
-they would change observable behavior. The current observable
-behavior is that any raised `SystemExit` produces exit code 1, but
-the new CLI exit-code translation is a separate decision.)
+The exact values are chosen for the spec. The legacy code's
+`SystemExit(_ExitMessage(msg))` produces exit code 1 for any
+exception path. The new exit codes distinguish:
+
+- `EXIT_SUCCESS` (0) — all issues migrated (or, in dry-run, a clean
+  dry-run).
+- `EXIT_INCOMPLETE` (1) — some issues migrated, some failed; the
+  migration is partial.
+- `EXIT_FAILURE` (2) — terminal failure before any issues were
+  attempted (e.g., clone failure, source 404).
+
+A dry-run that fails input validation in the CLI still exits with
+the validation code (2) before reaching the orchestrator.
 
 ### 3.4 Truthfulness rules
 
@@ -133,15 +160,25 @@ The final summary must obey:
 5. When `result.git["clone"] == "failed"`, the summary must include
    `"clone"` and `"fail"` substrings (per
    `test_clone_failure_summary_marks_clone_status_distinctly`).
+6. When `result.dry_run is True`, the summary uses a dry-run
+   template that does not say "migrated" or "complete" and does not
+   enumerate failures. The summary text contains the substring
+   `"dry-run"` (per `test_dry_run_summary_does_not_claim_migrated`,
+   to be added in stage 06).
+7. The final summary is written to `output` on success and to
+   `error_output` on any failure (per the new
+   `test_reporter_writes_failure_summary_to_error_sink` to be added
+   in stage 05).
 
 ### 3.5 Conciseness for push failures
 
 The summary surfaces the push failure as one line naming the status.
 The full advisory block is reachable from the orchestrator's events
-(`reporter.git_phase_finished(status="push failed: <advisory first
-line>")` or similar), but the final summary itself does not replay
-advisory lines. The exact wording of the push failure line is not
-locked; the constraint is the absence of advisory substrings.
+(`reporter.git_phase_finished(status="failed")` writes a one-line
+status; the advisory is part of the `GitPushError`'s `str()` and is
+not replayed into the final summary by the reporter). The exact
+wording of the push failure line is not locked; the constraint is the
+absence of advisory substrings.
 
 ### 3.6 Token redaction
 
@@ -161,23 +198,29 @@ test suite and is restated here for the spec.
   building, attribution block) stays in
   `forgejo_to_github.formatting` (already in place from before this
   plan).
-- **No I/O at module import.** The default `StdoutSink` is
-  constructed inside `Reporter.__init__` only when no sink is
-  supplied.
+- **No I/O at module import.** The default `StdoutSink` and
+  `StderrSink` are constructed inside `Reporter.__init__` only when
+  no sink is supplied.
 - **Sink injection is mandatory for tests.** The reporter does not
-  read or write `sys.stdout` itself; the sink encapsulates the
-  destination. Test fixtures substitute a recording sink.
+  read or write `sys.stdout` or `sys.stderr` itself; the sinks
+  encapsulate the destinations. Test fixtures substitute recording
+  sinks.
+- **No "no I/O at module import" over-reach.** The reporter may
+  import `sys` for the default sinks; the rule is that no I/O
+  happens at import time, not that the module is forbidden from
+  importing I/O-related modules.
 
 ## 5. Collaborator / dependency rules
 
-- `Reporter` accepts exactly one collaborator: the `Sink`. No state,
-  no clients, no Git mirror.
+- `Reporter` accepts two collaborators: the two `Sink` instances. No
+  state, no clients, no Git mirror.
 - `Reporter` depends on `MigrationResult` (stage 04) for its input
   type. It does not depend on `StateStore`, `CodebergClient`,
   `GitHubClient`, or `GitMirror`.
 - `Reporter` does not import `requests`, `subprocess`, `argparse`, or
-  any I/O module at module scope. The default sink is constructed
-  only when explicitly requested.
+  any I/O module at module scope other than `sys` (used by the
+  default sinks). The default sinks are constructed only when
+  explicitly requested.
 
 ## 6. Migration / compatibility constraints
 
@@ -198,6 +241,19 @@ test suite and is restated here for the spec.
 - `tests/test_reporting.py::test_report_names_every_failure_exactly_once`
 - `tests/test_reporting.py::test_git_push_failure_summary_does_not_replay_multiline_advisory`
 - `tests/test_reporting.py::test_clone_failure_summary_marks_clone_status_distinctly`
+
+Added in stage 05:
+
+- `tests/test_reporting.py::test_reporter_writes_failure_summary_to_error_sink` —
+  asserts that when `result.failures` is non-empty, the final summary
+  is written to the `error_output` sink and not to the `output`
+  sink.
+
+Added in stage 06:
+
+- `tests/test_reporting.py::test_dry_run_summary_does_not_claim_migrated` —
+  asserts the dry-run summary uses the dry-run template and does not
+  contain "migrated" or "complete" as success claims.
 
 Package boundary:
 
@@ -221,15 +277,20 @@ Legacy parity (must remain green throughout this stage):
 ## 8. Implementation order
 
 1. Add `forgejo_to_github/reporting.py` with `Sink`, `StdoutSink`,
-   `Reporter`, and exit-code constants.
-2. Run `./scripts/run-tests.sh tests/test_reporting.py
+   `StderrSink`, `Reporter`, and exit-code constants.
+2. Add the new test
+   `tests/test_reporting.py::test_reporter_writes_failure_summary_to_error_sink`
+   as a RED test that fails meaningfully before implementation. The
+   agent must stop and surface the RED state per
+   `test-framework-spec.md` §15.
+3. Run `./scripts/run-tests.sh tests/test_reporting.py
    tests/test_package_boundaries.py`. Confirm green.
-3. Run the legacy parity tests:
+4. Run the legacy parity tests:
    `./scripts/run-tests.sh tests/test_migration_reporting.py`.
    Confirm green.
-4. Run the full suite via `./scripts/run-tests.sh`. All pre-existing
+5. Run the full suite via `./scripts/run-tests.sh`. All pre-existing
    tests must remain green.
-5. Stop and report.
+6. Stop and report.
 
 ## 9. Verification commands
 
@@ -250,10 +311,10 @@ The implementing agent stops and reports:
 - Confirmation that `forgejo_to_github.reporting.Reporter` exists with
   the locked public surface.
 - Test results for the targeted suites plus the full suite.
-- The exact wording of the final summary for the four cases
+- The exact wording of the final summary for the five cases
   (complete success, issue failure, git push failure, git clone
-  failure), so the user can review and approve any wording change
-  before stage 06 locks it in.
+  failure, dry-run), so the user can review and approve any wording
+  change before stage 06 locks it in.
 - Confirmation that no `f2gh.py` symbols were modified in this stage.
 
 The user reviews before stage 06 begins.

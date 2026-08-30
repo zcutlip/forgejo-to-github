@@ -18,6 +18,8 @@ dataclass. The class must support:
 - Saving atomically via a temp file plus `os.replace`.
 - Surfacing malformed JSON and unsupported-state-version conditions as
   structured exceptions, not `json.JSONDecodeError` or `OSError`.
+- Loading and saving the legacy on-disk JSON shape so existing files
+  from `f2gh.save_state` remain usable.
 
 The store is the only module permitted to touch the on-disk state file.
 The orchestrator and CLI do not write the file directly.
@@ -26,6 +28,7 @@ The orchestrator and CLI do not write the file directly.
 
 - **New module:** `forgejo_to_github/state.py` containing:
   - `MigrationState` (frozen `@dataclass`).
+  - `IssueCheckpoint` (frozen `@dataclass`).
   - `StateStore` (regular `@dataclass` or class; signature is locked).
   - `StateLoadError` (exception).
   - `StateWriteError` (exception).
@@ -38,22 +41,44 @@ package and is referenced by name in `test_package_boundaries.py`'s
 
 ## 3. Public API and responsibilities
 
-### 3.1 `MigrationState`
+### 3.1 `MigrationState` and `IssueCheckpoint`
 
-Frozen dataclass. Plain Python dataclass, no pydantic, no attrs.
+Frozen dataclasses. Plain Python dataclass, no pydantic, no attrs.
 
-Fields:
+```python
+@dataclass(frozen=True)
+class IssueCheckpoint:
+    source_number: int
+    github_number: int
+    closed: bool
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `source` | `str` | Source `owner/repo` identity. |
-| `target` | `str` | Target `owner/repo` identity. |
-| `repo_created` | `bool` | True once the GitHub repo has been created this run. |
-| `git_pushed` | `bool` | True once the Git mirror has been pushed this run. |
-| `migrated` | `dict[int, int]` | Map of Codeberg issue number → GitHub issue number. |
+@dataclass(frozen=True)
+class MigrationState:
+    source: str
+    target: str
+    repo_created: bool
+    git_pushed: bool
+    migrated: dict[int, IssueCheckpoint]
+```
 
-The on-disk JSON serialization converts the int keys to strings (JSON
-object keys must be strings). `MigrationState` itself keeps int keys.
+Field notes:
+
+- `migrated` keys are Codeberg issue numbers (int). Values are
+  `IssueCheckpoint` records.
+- The on-disk JSON serialization reduces `migrated` to a flat
+  `dict[str, int]` mapping source issue number (as a string) to GitHub
+  issue number. The `closed` field is **not** persisted in this
+  revision. On reload, `closed` is reconstructed as `True` if and only
+  if the source issue's `state == "closed"` is encountered later by the
+  orchestrator; the first reload yields `closed=False` for all entries.
+  The on-disk format therefore remains
+  `{"source": ..., "target": ..., "migrated": {"<src>": <gh>}}`,
+  which is the legacy format produced by `f2gh.save_state`.
+- The decision to omit per-issue comment progress and `closed` from
+  disk is a deliberate simplification. **Resume of a partially
+  completed issue re-creates all comments and re-issues the close.**
+  This is approved at the spec-review step; it is the locked behavior
+  for this plan.
 
 ### 3.2 `StateStore`
 
@@ -74,7 +99,9 @@ Methods:
   - If `state_path` does not exist: return a fresh `MigrationState`
     with `source=source, target=target, repo_created=False,
     git_pushed=False, migrated={}`.
-  - If `state_path` exists and JSON is malformed: raise `StateLoadError`.
+  - If `state_path` exists and JSON is malformed: raise `StateLoadError`
+    with `reason` set to a redaction-safe message and `path` set to
+    `state_path`.
   - If `state_path` exists and `source` or `target` field does not
     match the constructor's identity: return a fresh state (legacy
     compatibility rule, preserved from `f2gh.load_state`).
@@ -83,11 +110,29 @@ Methods:
     with message containing "unsupported state version". Absent version
     is acceptable for files written by the legacy `f2gh.save_state`,
     which never wrote a version field.
+  - If `state_path` exists and contains a `"version"` key not parseable
+    as an integer: raise `StateLoadError` with `reason` referencing
+    "version".
+  - If `state_path` exists and contains unexpected top-level keys
+    beyond the documented set (`{"source", "target", "migrated",
+    "repo_created", "git_pushed", "version"}`): raise `StateLoadError`
+    with `reason` referencing the offending key. The check is performed
+    by a documented `ACCEPTED_KEYS` constant.
+  - If `state_path` exists and `migrated` values are not parseable as
+    integers (e.g., a string): raise `StateLoadError` with `reason`
+    referencing "migrated".
   - On success: return a `MigrationState` whose `migrated` keys are
-    coerced back to `int`.
+    coerced back to `int` and whose values are `IssueCheckpoint`
+    instances with `closed=False` (per §3.1).
 
-- `save(repo_created: bool, git_pushed: bool, migrated: dict[int, int]) -> None`
-  - Serialize the current `source`, `target`, plus the supplied fields.
+- `save(state: MigrationState) -> None`
+  - Serialize the supplied `MigrationState` to JSON, with `migrated`
+    reduced to `dict[str, int]` (source number → GitHub number) per
+    §3.1.
+  - The current `source`, `target`, `repo_created`, and `git_pushed`
+    are taken from the supplied `state`. The `StateStore` constructor's
+    `source` and `target` are not re-checked at save time; the caller
+    is responsible for passing a state whose identity matches.
   - Write to `<state_path>.tmp` in the same directory.
   - `fsync` the temp file.
   - `os.replace` the temp file onto `state_path`.
@@ -114,6 +159,16 @@ Performs the temp-file + fsync + `os.replace` sequence. Raises
 `StateWriteError` on `OSError`. The orchestrator and CLI do not call
 this helper directly; it is an implementation detail of `StateStore.save`.
 
+### 3.5 Accepted-keys constant
+
+```python
+ACCEPTED_KEYS: frozenset[str] = frozenset(
+    {"source", "target", "migrated", "repo_created", "git_pushed", "version"}
+)
+```
+
+`load()` raises `StateLoadError` for any top-level key outside this set.
+
 ## 4. Invariants
 
 - **Single ownership of the state path.** No module-level constant for
@@ -127,8 +182,10 @@ this helper directly; it is an implementation detail of `StateStore.save`.
   file in a partially written state. The destination either retains
   its prior contents (if `os.replace` did not run) or contains the new
   full payload (if it did).
-- **Round-trip equality.** `state == StateStore(...).save(...); reload`.
-  Integer keys come back as integers.
+- **Round-trip equality.** `state == StateStore(...).save(state);
+  reload` for the fields that round-trip (`source`, `target`,
+  `repo_created`, `git_pushed`, and the `source_number`/`github_number`
+  pair for each `IssueCheckpoint`). `closed` is not round-tripped.
 - **No network, no subprocess.** `forgejo_to_github.state` imports only
   from the standard library.
 
@@ -136,7 +193,8 @@ this helper directly; it is an implementation detail of `StateStore.save`.
 
 - `StateStore` accepts no collaborators. It depends only on the
   filesystem and the standard library.
-- `MigrationState` is a pure value object; no methods perform I/O.
+- `MigrationState` and `IssueCheckpoint` are pure value objects; no
+  methods perform I/O.
 - The atomic write helper must not be exposed publicly. Tests that need
   to assert the `os.replace` call use `unittest.mock.patch` on
   `os.replace` from within `forgejo_to_github.state`'s namespace.
@@ -149,7 +207,8 @@ this helper directly; it is an implementation detail of `StateStore.save`.
   `tests/test_characterization.py` (`test_load_state_returns_fresh_defaults_when_*`,
   `test_save_state_uses_os_replace_for_atomic_write`) still pass against
   the legacy functions. They are removed in stage 06 (CLI wiring)
-  once the new orchestrator is wired to `StateStore`.
+  once the new orchestrator is wired to `StateStore`. The test rewrite
+  is governed by `06-cli-wiring.md` §6.
 - **JSON on disk must remain backward-compatible.** Files produced by
   the legacy `save_state` (no `version` field, integer keys serialized
   as strings) must load successfully in the new `StateStore.load`. This
@@ -157,8 +216,12 @@ this helper directly; it is an implementation detail of `StateStore.save`.
   `test_load_ignores_checkpoint_with_mismatched_source` /
   `_target` (identity mismatch) and indirectly by `test_round_trip_restores_int_keys`.
 - **Version field is optional.** Files without a `"version"` key are
-  accepted; absence is not an error. Only a present-but-unsupported
-  version is an error.
+  accepted; absence is not an error. Only a present-but-unsupported or
+  non-integer version is an error.
+- **Unknown keys are rejected.** The `ACCEPTED_KEYS` check is part of
+  the public contract. A future version of the format may add new keys
+  by updating `ACCEPTED_KEYS`; this is an explicit change to the public
+  contract.
 
 ## 7. Test references
 
@@ -203,9 +266,9 @@ A RED `to be added` test — `test_per_issue_checkpoint_advances_only_on_full_su
 
 ## 8. Implementation order
 
-1. Add `forgejo_to_github/state.py` with `MigrationState`, `StateStore`,
-   `StateLoadError`, `StateWriteError`, and the private atomic write
-   helper.
+1. Add `forgejo_to_github/state.py` with `MigrationState`,
+   `IssueCheckpoint`, `StateStore`, `StateLoadError`, `StateWriteError`,
+   the `ACCEPTED_KEYS` constant, and the private atomic write helper.
 2. Run `./scripts/run-tests.sh tests/test_state_store.py
    tests/test_package_boundaries.py`. Both must be green before the
    legacy compatibility tests are even consulted.
@@ -251,3 +314,5 @@ The user reviews before stage 02 begins.
   legacy functions and must not be weakened.
 - Adding a CLI flag to migrate state file format versions. Not in this
   plan.
+- Persisting `closed` or comment-progress per issue. See §3.1; this is
+  a deliberate simplification approved at spec review.

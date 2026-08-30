@@ -1,7 +1,8 @@
 # Stage 02 — API clients (Codeberg and GitHub)
 
 **Parent stage:** [`00-index.md`](./00-index.md)
-**Depends on:** stage 01 (`MigrationState`, `StateLoadError`).
+**Depends on:** stage 01 (no direct dependency on state, but stage 04
+will reference `MigrationState` shape).
 **Blocks:** stage 04 (orchestrator), stage 06 (CLI wiring).
 
 ## 1. Objective
@@ -65,7 +66,8 @@ class Transport(Protocol):
 The Protocol is structural (duck-typed). It is satisfied by:
 
 - `RequestsTransport` — the production default, wraps
-  `requests.Session.request`. Forwards kwargs through.
+  `requests.Session.request`. Forwards kwargs through. The adapter
+  imports `requests` lazily inside its methods, not at module scope.
 - The test fixtures in `tests/test_codeberg_client.py` and
   `tests/test_github_client.py` (the local `FakeTransport`).
 
@@ -94,28 +96,35 @@ Methods:
 
 | Method | Returns | HTTP contract |
 |--------|---------|---------------|
-| `list_issues(state: str = "all") -> Iterator[dict]` | generator of parsed issue dicts | `GET /repos/{owner}/{repo}/issues?state={state}&type=issues&page=N&limit=50`; paginates until an empty page is returned. Sorts results by `created_at` ascending on finalization (or returns a list sorted — pick one and document). The test `test_fetch_all_codeberg_issues_sorts_by_created_at_ascending` implies sort; choose to return `list[dict]` rather than `Iterator[dict]` so the test pattern `list(client.list_issues())` plus sorting is supported. **Decision: `list_issues` returns a `list[dict]`**, sorted ascending by `created_at`. |
-| `list_comments(issue_id: int) -> Iterator[dict]` | generator | `GET /repos/{owner}/{repo}/issues/{issue_id}/comments?issue_id={issue_id}&page=N`; paginates until empty page. **Decision: `list_comments` returns `list[dict]`.** |
+| `list_issues(state: str = "all") -> list[dict]` | list of parsed issue dicts sorted ascending by `created_at` | `GET /repos/{owner}/{repo}/issues?state={state}&type=issues&page=N&limit=50`; paginates until an empty page is returned. |
+| `list_comments(issue_id: int) -> list[dict]` | list of parsed comment dicts in API order (chronological) | `GET /repos/{owner}/{repo}/issues/{issue_id}/comments?issue_id={issue_id}&page=N`; paginates until empty page. |
 | `get_issue(issue_number: int) -> dict` | parsed dict | `GET /repos/{owner}/{repo}/issues/{issue_number}` |
-| `get_repository_description() -> str` | description string | `GET /repos/{owner}/{repo}`; returns the `description` field, or empty string if missing/null |
+| `get_repository_description() -> str` | description string. **Empty string** when the field is missing or `null`. The orchestrator is responsible for the "Migrated from Codeberg" fallback; the client does not invent a default. | `GET /repos/{owner}/{repo}`; returns the `description` field, or `""` if missing/null. |
 
-Error translation rules:
+Error translation rules. The order of these rules is the order the
+client applies them:
 
-| Status / condition | Translated to |
-|--------------------|---------------|
-| 200 with valid payload | normal return |
-| 404 | `CodebergNotFoundError` carrying `issue_number` (when applicable) and `url` |
-| 401, 403 | `CodebergAuthError` |
-| 429 | `CodebergRateLimitError` with `retry_after: int | None` |
-| 5xx (after no internal retry; Codeberg clients do not retry) | `CodebergTransportError` |
-| Underlying transport raises (connection refused, DNS failure, timeout) | `CodebergTransportError`; the message must not contain the token. |
+| # | Status / condition | Translated to |
+|---|--------------------|---------------|
+| 1 | 200 with valid payload | normal return |
+| 2 | 404 | `CodebergNotFoundError` carrying `issue_number` (when applicable) and `url` |
+| 3 | 401, 403 | `CodebergAuthError` |
+| 4 | 422 | `CodebergValidationError` carrying parsed error messages |
+| 5 | 429 | `CodebergRateLimitError` with `retry_after: int | None` |
+| 6 | 5xx | `CodebergTransportError` |
+| 7 | Underlying transport raises (connection refused, DNS failure, timeout) | `CodebergTransportError`; the message must not contain the token. |
+
+The 403-vs-429 distinction in Codeberg is simple: any 403 maps to
+`CodebergAuthError`. There is no "X-RateLimit-Remaining: 0" rule
+because the Forgejo v1 API does not emit that header for primary rate
+limits (it uses 429).
 
 Headers:
 
 - `Accept: application/json` always.
-- `User-Agent: forgejo-to-github/<version>` always. (The version is
+- `User-Agent: forgejo-to-github/<version>` always. The version is
   read from the package metadata or hard-coded to `"forgejo-to-github"`
-  if not available.)
+  if not available.
 - `Authorization: token <CODEBERG_TOKEN>` only when `token` is not
   `None`. When `token is None`, the `Authorization` header must be
   absent entirely (not present-but-empty).
@@ -136,33 +145,35 @@ Methods:
 
 | Method | Returns | HTTP contract |
 |--------|---------|---------------|
-| `create_repository(name: str, description: str | None, public: bool) -> dict` | parsed repo dict | `POST /user/repos` with payload `{name, private: not public, description, has_issues: True}`. On non-2xx, falls back to `POST /orgs/{owner}/repos` and retries (only the owner-fallback path is in scope for the org endpoint). |
-| `update_repository_description(description: str) -> None` | None | `PATCH /repos/{owner}/{repo}` with `{"description": description}`. Called only when a non-empty description is provided; the orchestrator is responsible for the empty-description skip. |
+| `create_repository(name: str, description: str | None, public: bool) -> dict` | parsed repo dict | `POST /user/repos` with payload `{name, private: not public, description, has_issues: True}`. On non-2xx, falls back to `POST /orgs/{owner}/repos` and retries (only the owner-fallback path is in scope for the org endpoint). The personal-then-org order is locked. |
+| `update_repository_description(description: str) -> None` | None | `PATCH /repos/{owner}/{repo}` with `{"description": description}`. The orchestrator is responsible for the empty-description skip; the client issues the call whenever it is invoked. |
 | `check_repository_exists() -> dict | None` | parsed repo dict on 200, `None` on 404 | `GET /repos/{owner}/{repo}` |
 | `create_issue(title: str, body: str, labels: list[str]) -> int` | issue `number` | `POST /repos/{owner}/{repo}/issues` with `{title, body, labels}`; returns parsed `number` |
 | `create_comment(issue_number: int, body: str) -> int` | comment `id` | `POST /repos/{owner}/{repo}/issues/{issue_number}/comments` with `{body}`; returns parsed `id` |
 | `close_issue(issue_number: int) -> None` | None | `PATCH /repos/{owner}/{repo}/issues/{issue_number}` with `{state: "closed"}` |
 | `ensure_label(name: str, color: str, description: str) -> None` | None | `GET /repos/{owner}/{repo}/labels/{name}` first; on 404, `POST /repos/{owner}/{repo}/labels` with `{name, color, description}`. On 200 from the GET, no POST is issued. |
 
-Error translation rules:
+Error translation rules. The order of these rules is the order the
+client applies them. Earlier rules win:
 
-| Status / condition | Translated to |
-|--------------------|---------------|
-| 2xx with valid payload | normal return |
-| 401, 403 | `GitHubAuthError` |
-| 422 | `GitHubValidationError` carrying parsed `errors` from the response body |
-| 403 with `X-RateLimit-Remaining: 0` | `GitHubRateLimitError` carrying `reset: int` |
-| 429 | `GitHubRateLimitError` with `retry_after: int | None` |
-| Secondary rate limit (three consecutive 429 or 403-with-zero-remaining responses) | after three retries, raise `GitHubRateLimitError` |
-| 5xx (no internal retry beyond secondary-rate-limit logic) | `GitHubTransportError` |
-| Underlying transport raises | `GitHubTransportError` |
+| # | Status / condition | Translated to |
+|---|--------------------|---------------|
+| 1 | 2xx with valid payload | normal return |
+| 2 | 429 | `GitHubRateLimitError` with `retry_after: int | None`. Retried up to 3 times within the client before giving up. |
+| 3 | 403 with `X-RateLimit-Remaining: 0` (header present and zero) | `GitHubRateLimitError` carrying `reset: int | None`. Retried up to 3 times within the client. |
+| 4 | 401 | `GitHubAuthError` |
+| 5 | 403 (other than 3 above) | `GitHubAuthError` |
+| 6 | 422 | `GitHubValidationError` carrying parsed `errors` from the response body |
+| 7 | 5xx | `GitHubTransportError` |
+| 8 | Underlying transport raises | `GitHubTransportError` |
 
 The retry/backoff behavior for 429 / 403-with-zero-remaining lives
 inside the GitHub client, not the orchestrator. After three attempts,
 the client raises `GitHubRateLimitError`. The test
 `test_rate_limit_429_is_retried_then_terminates_with_rate_limit_error`
 asserts that exactly three POST attempts are issued before the client
-gives up.
+gives up. The retry policy between attempts is implementation-defined
+(but bounded by the 3-attempt cap) and not part of the public contract.
 
 Headers (production default adapter only; the test fake observes
 whatever headers the client constructs):
@@ -194,8 +205,71 @@ GitHubError(Exception)
 └── GitHubTransportError
 ```
 
-`CodebergNotFoundError` is imported and used in `test_codeberg_client.py::test_get_issue_404_raises_not_found_with_context`
-and is asserted to carry `err.issue_number == 99` and `err.url.endswith("/issues/99")`.
+`CodebergNotFoundError` is imported and used in
+`test_codeberg_client.py::test_get_issue_404_raises_not_found_with_context`
+and is asserted to carry `err.issue_number == 99` and
+`err.url.endswith("/issues/99")`.
+
+### 3.5 Repository description behavior
+
+The orchestrator is the single owner of description policy. The
+client's `get_repository_description()` returns the literal
+`description` field of the GET response, coerced to an empty string
+when missing or `null`. **It does not fall back to `"Migrated from
+Codeberg"`.** That fallback is the orchestrator's responsibility, and
+it is also conditioned on the HTTP call succeeding.
+
+The client's `update_repository_description(description)` issues a
+PATCH whenever called. The orchestrator is the single place that
+decides when to call it:
+
+- If `repo.description` is non-empty, the orchestrator calls
+  `update_repository_description` with that value (after repo
+  creation).
+- If `repo.description` is empty and the target repo did not exist
+  before, the orchestrator fetches the source description; if the
+  fetch returns non-empty, the orchestrator passes it to
+  `create_repository`; if the fetch returns empty, the orchestrator
+  uses `"Migrated from Codeberg"`. No `update_repository_description`
+  call is made in either sub-case.
+- If `repo.description` is empty and the target repo already existed,
+  the orchestrator does not call `update_repository_description` and
+  does not fetch the source description.
+- On `codeberg.get_repository_description()` HTTP failure (transport
+  error, 5xx, etc.), the orchestrator uses `"Migrated from Codeberg"`
+  and logs a one-line warning. The fetch error does not become a
+  migration failure.
+
+`tests/test_repository_description.py` is rewritten in stage 06 to
+drive `MigrationOrchestrator` directly; the four end-state contracts
+preserved are:
+
+1. `test_explicit_description_passed_to_create_github_repo` —
+   explicit `description` is forwarded to `create_repository`.
+2. `test_codeberg_non_empty_description_passed_to_create_github_repo` —
+   when no explicit description and source description is non-empty,
+   the source description is forwarded to `create_repository`.
+3. `test_codeberg_empty_description_falls_back_to_default` — when no
+   explicit description and source description is empty, no PATCH is
+   issued; `"Migrated from Codeberg"` is the `description` argument to
+   `create_repository`.
+4. `test_codeberg_metadata_http_error_falls_back_to_default` — when
+   the source metadata fetch raises, the orchestrator logs a warning
+   and proceeds with `"Migrated from Codeberg"`.
+5. `test_codeberg_metadata_connection_error_falls_back_to_default`,
+   `test_codeberg_metadata_timeout_falls_back_to_default` — same as 4
+   for the specific transport errors.
+6. `test_existing_target_does_not_fetch_or_create_repo` — when the
+   target repo already exists, the orchestrator does not fetch the
+   source description and does not call `create_repository`.
+7. `test_existing_target_ignores_explicit_description_argument` —
+   when the target repo already exists, an explicit `--description`
+   does not cause a `update_repository_description` call.
+8. `test_dry_run_does_not_create_repo_or_mutate_description` — under
+   `--dry-run`, no HTTP and no state writes.
+9. `test_dry_run_does_not_create_repo_when_explicit_description_given`
+   — under `--dry-run` with an explicit `--description`, no HTTP and
+   no state writes.
 
 ## 4. Invariants
 
@@ -219,6 +293,11 @@ and is asserted to carry `err.issue_number == 99` and `err.url.endswith("/issues
   (GitHub). The implementation must apply redaction before raising.
 - **No dependency on the orchestrator or reporter.** The clients know
   nothing about `MigrationOrchestrator`, `Reporter`, or `StateStore`.
+- **No "I/O at import" module rule.** The "no I/O at module import"
+  rule is satisfied by lazy imports of `requests` and other I/O
+  libraries; importing the module does not perform network or
+  filesystem work, but it is permitted to import I/O libraries for
+  later use.
 
 ## 5. Collaborator / dependency rules
 
@@ -226,7 +305,7 @@ and is asserted to carry `err.issue_number == 99` and `err.url.endswith("/issues
   not depend on each other.
 - `Transport` Protocol depends on nothing.
 - `RequestsTransport` depends on `requests` (already a project
-  dependency).
+  dependency). It imports `requests` lazily inside its methods.
 - `forgejo_to_github.codeberg` and `forgejo_to_github.github` may
   import from `forgejo_to_github.transport` and `forgejo_to_github.domain`
   (for shared domain types if any), but neither imports from the
@@ -353,6 +432,8 @@ The user reviews before stage 03 begins.
 - A real async/await transport. The Protocol is synchronous; the
   production adapter is `requests`-based.
 - Adding label-color defaulting logic. The orchestrator passes the
-  color; the client forwards it. (A documented default color is
-  asserted by `test-framework-spec.md` §10.3 to be applied by the
-  orchestrator when missing — that orchestration concern is stage 04.)
+  color; the client forwards it. A documented default color is
+  applied by the orchestrator when missing. The
+  default-color behavior is part of the orchestrator's contract and
+  is defined in stage 04. The client itself does not default the
+  color.

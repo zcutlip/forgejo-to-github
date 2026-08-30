@@ -39,7 +39,6 @@ instances together.
 
 - **`f2gh.py`** is modified in this stage. The set of modifications is
   bounded:
-
   - `parse_args()` stays (with the same argparse definition; the help
     text and flag set are unchanged).
   - `main()` is rewritten to build the collaborators and call the
@@ -49,9 +48,11 @@ instances together.
     `f2gh` console-script entry point and the `tests/test_cli.py`
     `import f2gh` work.
   - `f2gh.py` does **not** import `requests` at module scope. It
-    imports `argparse`, `sys`, `pathlib`, and the new package modules.
+    imports `argparse`, `os`, `subprocess`, `sys`, `pathlib`, and the
+    new package modules.
 
-- **No other files modified** in this stage.
+- **No other files modified** in this stage, except for the test
+  rewrites described in §6.
 
 - `pyproject.toml` is unchanged: `f2gh` is still the entry point;
   `pythonpath = ["."]` still lets `import f2gh` resolve.
@@ -72,10 +73,9 @@ exercise this function and remain green.
 Rewritten. The function:
 
 1. Calls `parse_args()`.
-2. Resolves the state file path: `--state-file` if added in a future
-   plan, otherwise `Path("state.json")` in the current working
-   directory. (For stage 06, the default path is `Path("state.json")`;
-   the `--state-file` flag is **not** introduced in this stage.)
+2. Resolves the state file path: `Path("state.json")` in the current
+   working directory. (`--state-file` is **not** introduced in this
+   plan; see `00-index.md` "State file path" decision.)
 3. Reads the Codeberg token from `os.environ["CODEBERG_TOKEN"]`. If
    missing, raise `SystemExit("CODEBERG_TOKEN not set.")` — preserving
    the legacy behavior the existing `codeberg_token()` helper
@@ -85,7 +85,14 @@ Rewritten. The function:
    `SystemExit("GITHUB_TOKEN not set and 'gh auth token' failed.")`
    on failure — preserving the legacy behavior of
    `get_github_token()`.
-5. Constructs:
+5. Splits `args.source` and `args.target` on the first `/`. If either
+   split yields fewer than two parts, raise
+   `SystemExit("invalid source/target: ...")` with the same exit code
+   as argparse argument errors (2). This matches the contract
+   asserted by `test-framework-spec.md` §7.1
+   (`source/target accept owner/repo form; bare names raise a structured
+   parse error`).
+6. Constructs:
    - `codeberg_transport = RequestsTransport()` (production default).
    - `github_transport = RequestsTransport()`.
    - `codeberg = CodebergClient(base_url="https://codeberg.org",
@@ -94,34 +101,49 @@ Rewritten. The function:
    - `github = GitHubClient(base_url="https://api.github.com",
      owner=target_owner, repo=target_repo, token=github_token,
      transport=github_transport)`.
-   - `git = GitMirror(source_url=..., target_url=...)`.
+   - `git = GitMirror(source_url=..., target_url=..., github_token=github_token)`.
    - `state = StateStore(state_path, source, target)`.
-   - `reporter = Reporter()` (default `StdoutSink`).
-6. Constructs `repo = Repository(source=..., target=..., description=...,
+   - `reporter = Reporter()` (default `StdoutSink`/`StderrSink`).
+7. Constructs `repo = Repository(source=..., target=..., description=...,
    public=args.public, skip_git=args.skip_git, dry_run=args.dry_run,
    yes=args.yes)`.
-7. Constructs
+8. Constructs
    `orchestrator = MigrationOrchestrator(repo=repo, codeberg=codeberg,
    github=github, git=git, state=state, reporter=reporter)`.
-8. Calls `result = orchestrator.run()`.
-9. Calls `reporter.render_final(result)`.
-10. Calls `sys.exit(reporter.exit_outcome(result))`.
+9. Calls `result = orchestrator.run()`.
+10. Calls `reporter.render_final(result)`.
+11. Calls `sys.exit(reporter.exit_outcome(result))`.
 
 The orchestrator owns the rest of the run; `main()` does not
 implement any phase logic itself.
 
-### 3.3 Owner/repo parsing
+### 3.3 Dry-run override at the CLI
 
-`source` and `target` come in as `owner/repo` strings. `main()`
-splits each on the first `/` and passes `owner` and `repo` separately
-to the API client constructors. If the split yields fewer than two
-parts, `main()` raises `SystemExit("invalid source/target: ...")`
-with the same exit code as argparse argument errors (2). This matches
-the contract asserted by `test-framework-spec.md` §7.1
-(`source/target accept owner/repo form; bare names raise a structured
-parse error`).
+The CLI **also** short-circuits on dry-run before constructing the
+orchestrator, so the orchestrator's own dry-run short-circuit is a
+defense-in-depth check. The CLI's pre-orchestrator dry-run behavior
+is to:
 
-### 3.4 Compatibility preservation
+1. Validate `args` (already done by `parse_args`).
+2. Resolve the state path and read the Codeberg/GitHub tokens.
+3. Construct a `Repository` with `dry_run=True`.
+4. Construct the orchestrator and call `run()`.
+5. Call `reporter.render_final(result)`.
+6. Call `sys.exit(reporter.exit_outcome(result))` (which returns
+   `EXIT_SUCCESS` for dry-run).
+
+The CLI does not issue any HTTP or git subprocess during a dry-run
+because the orchestrator's dry-run short-circuit returns immediately.
+The token reads remain because they are local environment reads.
+
+### 3.4 `f2gh._build_orchestrator(args: argparse.Namespace) -> MigrationOrchestrator`
+
+A new private helper inside `f2gh.py`. It performs steps 3–8 of
+`main()`. This isolates the wiring logic so it can be tested
+directly. Its name is `_build_orchestrator` and it is the only
+non-public symbol left in `f2gh.py` after this stage.
+
+### 3.5 Compatibility preservation
 
 The legacy public surface that tests pin:
 
@@ -129,10 +151,12 @@ The legacy public surface that tests pin:
 |---------------|-------------|
 | `f2gh.parse_args` | kept; same signature |
 | `f2gh.main` | kept; same name and zero-arg signature; rewired body |
-| `f2gh.migrate(...)` | **removed**; tests in `tests/test_migration_reporting.py`, `tests/test_issue_fetch_errors.py` are rewritten in this stage to target the new orchestrator. See §6 below. |
-| `f2gh.STATE_FILE` | **removed**; `tests/test_state.py::test_save_and_load_state_round_trip` and `tests/test_migration_reporting.py::_isolated_state` are rewritten to use `StateStore(path, source, target)` directly. |
-| `f2gh.load_state` / `f2gh.save_state` | **removed**; the legacy `tests/test_characterization.py` load/save tests are deleted because the `StateStore` tests in `tests/test_state_store.py` already cover the contract. See §6 below. |
-| `f2gh.mirror_git_repo` | **removed**; the tests in `tests/test_git_errors.py` that exercise `f2gh.mirror_git_repo` via the CLI harness are rewritten to drive `GitMirror` directly with fake command runners. See §6 below. |
+| `f2gh.migrate(...)` | **removed**; tests in `tests/test_migration_reporting.py`, `tests/test_issue_fetch_errors.py` are rewritten in this stage to target the new orchestrator. See §6. |
+| `f2gh.STATE_FILE` | **removed**; `tests/test_state.py::test_save_and_load_state_round_trip` is rewritten to use `StateStore(path, source, target)` directly. |
+| `f2gh.load_state` / `f2gh.save_state` | **removed**; the legacy `tests/test_characterization.py` load/save tests are deleted because the `StateStore` tests in `tests/test_state_store.py` already cover the contract. See §6. |
+| `f2gh.mirror_git_repo` | **removed**; the tests in `tests/test_git_errors.py` that exercise `f2gh.mirror_git_repo` via the CLI harness are rewritten to drive `GitMirror` directly with fake command runners. See §6. |
+| `f2gh._ExitMessage` | **removed**; the `SystemExit(_ExitMessage(msg))` wrapper is replaced by `sys.exit(reporter.exit_outcome(result))`. |
+| `f2gh._build_orchestrator` | **new private helper**; not part of any test surface. |
 
 The legacy `f2gh` top-level module remains importable so the
 `f2gh = "f2gh:main"` entry point resolves.
@@ -142,9 +166,12 @@ The legacy `f2gh` top-level module remains importable so the
 - **`f2gh.py` imports no `requests` at module scope.** The default
   `RequestsTransport` adapter is the only place that touches the
   `requests` library, and it does so lazily inside its methods.
-- **`f2gh.py` imports no `subprocess` at module scope.** The legacy
-  `get_github_token()` call to `gh auth token` happens inside
-  `main()`, not at module import.
+- **`f2gh.py` imports `subprocess` at module scope only for the
+  `gh auth token` call.** The `subprocess.run` call to
+  `["gh", "auth", "token"]` happens inside `main()` / `_build_orchestrator`,
+  not at module import. The `import subprocess` line is allowed at
+  the top of `f2gh.py` because no subprocess is spawned at import
+  time; the run call is deferred to runtime.
 - **The orchestrator is constructed exactly once per `main()`
   invocation.** There is no module-level orchestrator instance.
 - **No collaborator leaks across invocations.** Each `main()` call
@@ -165,14 +192,34 @@ The legacy `f2gh` top-level module remains importable so the
 - `f2gh.parse_args` may not import any package module. It is pure
   argparse logic.
 
-## 6. Migration / compatibility constraints
+## 6. Test rewrite and deletion protocol
 
-### 6.1 Test file rewrites permitted in this stage
+The test framework spec (`test-framework-spec.md` §16) treats the
+test suite as a locked contract. The refactor necessarily requires
+amending or deleting some tests that exercise legacy `f2gh.py`
+symbols that stage 06 removes. This section defines the formal
+protocol that the implementing agent follows.
+
+### 6.1 Approval gate
+
+Before any test in this section is amended, deleted, or replaced,
+the implementing agent:
+
+1. Lists the affected tests in the stage 06 stop-gate report.
+2. For each affected test, identifies the legacy symbol it exercises
+   and the new symbol (or new behavior) it should exercise instead.
+3. Surfaces this list in the stop-gate report and waits for explicit
+   user approval per test before proceeding.
+
+The agent may not silently amend or delete tests. The user reviews
+each change and either approves or rejects.
+
+### 6.2 Permitted test changes in stage 06
 
 The following test files reference legacy `f2gh.py` symbols that
-stage 06 removes. The implementing agent rewrites these tests to
-exercise the new package modules while preserving every observable
-contract:
+stage 06 removes. With user approval per §6.1, the implementing
+agent rewrites these tests to exercise the new package modules
+while preserving every observable contract:
 
 - **`tests/test_state.py`** — `test_save_and_load_state_round_trip`
   currently monkeypatches `f2gh.STATE_FILE`. Rewrite to construct
@@ -198,22 +245,37 @@ contract:
   directly with fake command runners and a fake tempdir factory. The
   observable assertions (advisory text, workflow scope detection,
   no-token-leak, push-failed-not-clone-failed) remain.
+- **`tests/test_cli.py::test_main_invokes_parse_args_then_migrate`** —
+  the test name references the legacy `migrate`. Rewrite to:
+  - Either rename the test to
+    `test_main_invokes_parse_args_then_run` and patch
+    `forgejo_to_github.migration.MigrationOrchestrator.run` instead
+    of `f2gh.migrate`.
+  - Or, preferrably, keep the test name and have it patch the
+    orchestrator's `run` method through the new public seam.
+  In both cases, the observable assertion — `main()` calls
+  `parse_args()` and forwards keyword arguments to the orchestrator
+  — is preserved. The test function name and assertion are
+  approved for renaming only via the gate in §6.1.
+- **`tests/test_git_service.py::test_tag_name_containing_token_is_redacted`**
+  — the new `push_tags` does not accept tag names as argv, so this
+  test is **deleted**. The deletion is recorded in the stage 06
+  stop-gate report.
 
-### 6.2 Test file rewrites NOT permitted in this stage
+### 6.3 Test file rewrites NOT permitted in stage 06
 
-- **`tests/test_cli.py`** stays exactly as it is. It imports `f2gh`
-  and calls `f2gh.parse_args()` / `f2gh.main()`; the CLI surface is
-  the contract. The implementing agent verifies that the rewired
-  `main()` still passes these tests without modification.
+- **`tests/test_cli.py`** stays exactly as it is, except for the
+  one test listed in §6.2.
 - **`tests/test_orchestration.py`** stays exactly as it is. Its
   fake split was made in stage 04.
 - **`tests/test_state_store.py`** stays exactly as it is.
 - **`tests/test_codeberg_client.py`**,
   **`tests/test_github_client.py`**,
   **`tests/test_git_service.py`**,
-  **`tests/test_reporting.py`** stay exactly as they are.
+  **`tests/test_reporting.py`** stay exactly as they are, except for
+  the one test listed in §6.2.
 
-### 6.3 CLI flag parity
+### 6.4 CLI flag parity
 
 The following flags must continue to be accepted by `parse_args()`
 with the same help text and defaults:
@@ -243,14 +305,9 @@ CLI:
 - `tests/test_cli.py::test_help_exits_zero_and_mentions_source_target`
 - `tests/test_cli.py::test_help_lists_documented_optional_flags`
 - `tests/test_cli.py::test_main_is_callable_entrypoint`
-- `tests/test_cli.py::test_main_invokes_parse_args_then_migrate`
+- `tests/test_cli.py::test_main_invokes_parse_args_then_migrate` (subject to
+  the rewrite in §6.2)
 - `tests/test_cli.py::test_parse_args_returns_namespace_with_expected_attributes`
-
-`test_main_invokes_parse_args_then_migrate` patches `f2gh.migrate`.
-Stage 06 rewrites this test to patch `f2gh._run` (the new internal
-entry) or the package-level `MigrationOrchestrator.run`. The
-observable assertion — `main()` calls `parse_args()` and forwards
-keyword arguments — is preserved.
 
 Characterization:
 
@@ -269,7 +326,7 @@ Characterization:
 State round-trip via `StateStore` directly:
 
 - `tests/test_state.py::test_save_and_load_state_round_trip` (rewritten
-  to use `StateStore`; see §6.1)
+  per §6.1 to use `StateStore`; see §6.2)
 
 Full suite remains green.
 
@@ -284,11 +341,8 @@ Full suite remains green.
    `sys.exit(reporter.exit_outcome(result))`.
 3. Run `./scripts/run-tests.sh tests/test_cli.py
    tests/test_characterization.py`. Confirm green.
-4. Rewrite the legacy-driven test files (`test_state.py`,
-   `test_migration_reporting.py`, `test_issue_fetch_errors.py`,
-   `test_git_errors.py`) per §6.1, deleting redundant load/save
-   tests in `test_characterization.py`. Confirm the rewritten tests
-   pass against the new package modules.
+4. Apply the test rewrites and deletions in §6.2, with the user
+   approval recorded in the stage 06 stop-gate report.
 5. Remove the legacy helpers from `f2gh.py`:
    `migrate`, `mirror_git_repo`, `cb_headers`, `gh_headers`,
    `gh_request`, `fetch_codeberg_description`, `create_github_repo`,
@@ -325,10 +379,9 @@ for faster debugging during the rewrite.
 The implementing agent stops and reports:
 
 - Confirmation that `f2gh.py` exposes only `parse_args`, `main`, and
-  the `_build_orchestrator` helper (or equivalent wiring function
-  named to match the spec).
-- The list of test files rewritten and the list of test files
-  deleted (with the user-approved justification for each deletion).
+  the `_build_orchestrator` helper.
+- The list of test files rewritten and the list of test functions
+  deleted, with the user-approved justification for each.
 - Test results for the full suite plus `ruff check .` and
   `mypy f2gh.py forgejo_to_github/`.
 - The exact wording of any user-facing CLI error messages that
