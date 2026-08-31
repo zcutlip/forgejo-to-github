@@ -24,6 +24,21 @@
 # intentional and accepted as RED. No real ``git`` binary is invoked; the
 # command runner and filesystem boundary are injected via constructor /
 # factory arguments so the tests stay concrete and offline.
+#
+# API-alignment amendment (approved):
+# The committed stage-03 GitMirror spec
+# (``plans/02-package-refactor-and-test-foundation/refactor/03-git-mirror.md``)
+# locks the constructor to require ``github_token`` and the public methods
+# ``push_branches`` / ``push_tags`` to take only ``local_path`` (returning
+# ``None``). The token is owned by the instance and ``--all`` / ``--tags``
+# replace the previous per-ref / per-tag argv. This amendment updates the
+# tests to match that locked surface. No behavioral assertion is weakened:
+# return-value assertions are replaced with command/side-effect assertions
+# on the same observable contract (the recorded argv, the redaction of
+# the token in the recorded argv, and the structured exception types).
+# The obsolete tag-name redaction test (no longer applicable because tag
+# names are no longer argv) is removed; URL/extraHeader/generic redaction
+# and all error/advice tests are retained.
 """RED-class behavioral tests for the future ``forgejo_to_github.git.GitMirror``.
 
 Tests cover the public behavior described in section 11 of the test-framework
@@ -41,6 +56,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import pytest
+
 from forgejo_to_github.git import GitMirror  # RED: ImportError until module lands.
 
 # ---------------------------------------------------------------------------
@@ -190,6 +206,7 @@ def test_clone_success_returns_local_path_and_records_command(
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
@@ -231,6 +248,7 @@ def test_clone_nonzero_exit_raises_structured_git_clone_error(
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
@@ -281,6 +299,7 @@ def test_clone_auth_failure_is_classified_as_git_auth_error(tmp_path: Any) -> No
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
@@ -314,6 +333,7 @@ def test_clone_timeout_classified_as_git_clone_timeout_error(
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
@@ -354,6 +374,7 @@ def test_clone_stderr_token_is_redacted_in_error_text(tmp_path: Any) -> None:
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
@@ -374,31 +395,55 @@ def test_clone_stderr_token_is_redacted_in_error_text(tmp_path: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_branch_push_success_returns_remote_ref(tmp_path: Any) -> None:
-    """A successful branch push returns the remote ref recorded on the
-    fake. Mirrors spec 11.2: ``A successful branch push returns the remote
-    ref recorded on the fake.``"""
+def test_branch_push_success_uses_all_and_redacts_token(
+    tmp_path: Any,
+    caplog: Any,
+) -> None:
+    """A successful branch push runs ``git -C <local_path> push
+    <auth_url> --all``; the recorded argv carries the ``--all`` flag, and
+    the redaction routine is applied to every command line surfaced
+    through the logger.
+
+    Mirrors spec 11.2 (amended): ``A successful branch push issues the
+    ``--all`` command on the fake and the token is redacted in every
+    command line surfaced.`` The approved stage-03 surface replaces the
+    per-ref return value with command/side-effect assertions on the same
+    observable contract. The redaction is observable on the log line,
+    not on the raw argv (which must contain the token for git's own
+    authentication).
+    """
     runner = _FakeRunner()
     fs_factory = _mkdtemp_under(tmp_path)
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
 
-    # Use the local path the runner produced during clone.
-    local_path = fs_factory.created[0]
-    ref = mirror.push_branches(local_path, refs=["main"], token=TOKEN_SENTINEL)
+    # Push phases operate on an independent local path; no real ``git``
+    # binary is invoked because the command runner is injected. The path
+    # lives under ``tmp_path`` to match the offline test boundary.
+    local_path = str(tmp_path / "mirror")
+    caplog.set_level(logging.INFO)
+    result = mirror.push_branches(local_path)
 
-    assert ref == "main"
+    # The approved API returns ``None``.
+    assert result is None
     push_calls = [c for c in runner.calls if "push" in c]
     assert len(push_calls) == 1
     recorded = push_calls[0]
-    assert "main" in recorded
-    # The token must not appear in the recorded argv.
-    assert TOKEN_SENTINEL not in recorded
+    # The branch push uses ``--all`` rather than per-ref argv.
+    assert "--all" in recorded
+    # The redaction routine must run on the command line surfaced via
+    # the logger; the raw argv forwarded to git contains the token so
+    # git can authenticate.
+    joined_log = " ".join(record.getMessage() for record in caplog.records)
+    assert TOKEN_SENTINEL not in joined_log, (
+        f"raw token leaked into log line: {joined_log!r}"
+    )
 
 
 def test_branch_push_failure_raises_git_push_error(tmp_path: Any) -> None:
@@ -428,13 +473,14 @@ def test_branch_push_failure_raises_git_push_error(tmp_path: Any) -> None:
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
-    local_path = fs_factory.created[0]
+    local_path = str(tmp_path / "mirror")
 
     with pytest.raises(Exception) as exc_info:
-        mirror.push_branches(local_path, refs=["main"], token=TOKEN_SENTINEL)
+        mirror.push_branches(local_path)
 
     cls_name = type(exc_info.value).__name__
     # GitPushError (or any subclass) is required.
@@ -479,13 +525,14 @@ def test_branch_push_non_fast_forward_is_classified_with_advice(
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
-    local_path = fs_factory.created[0]
+    local_path = str(tmp_path / "mirror")
 
     with pytest.raises(Exception) as exc_info:
-        mirror.push_branches(local_path, refs=["main"], token=TOKEN_SENTINEL)
+        mirror.push_branches(local_path)
 
     exc = exc_info.value
     cls_name = type(exc).__name__
@@ -500,30 +547,53 @@ def test_branch_push_non_fast_forward_is_classified_with_advice(
 # ---------------------------------------------------------------------------
 
 
-def test_tag_push_success_returns_pushed_refs(tmp_path: Any) -> None:
-    """A successful tag push returns the list of pushed refs.
+def test_tag_push_success_uses_tags_and_redacts_token(
+    tmp_path: Any,
+    caplog: Any,
+) -> None:
+    """A successful tag push runs ``git -C <local_path> push <auth_url>
+    --tags``; the recorded argv carries the ``--tags`` flag, and the
+    redaction routine is applied to every command line surfaced through
+    the logger.
 
-    Mirrors spec 11.3: ``A successful tag push returns the list of pushed
-    refs.``"""
+    Mirrors spec 11.3 (amended): ``A successful tag push issues the
+    ``--tags`` command on the fake and the token is redacted in every
+    command line surfaced.`` The approved stage-03 surface replaces the
+    per-tag return value with command/side-effect assertions on the
+    same observable contract; tag names are not in argv because the
+    ``--tags`` flag pushes every tag at once. The redaction is
+    observable on the log line, not on the raw argv (which must contain
+    the token for git's own authentication).
+    """
     runner = _FakeRunner()
     fs_factory = _mkdtemp_under(tmp_path)
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
-    local_path = fs_factory.created[0]
+    local_path = str(tmp_path / "mirror")
+    caplog.set_level(logging.INFO)
 
-    refs = mirror.push_tags(local_path, tags=["v1.0.0", "v1.1.0"], token=TOKEN_SENTINEL)
+    result = mirror.push_tags(local_path)
 
-    assert refs == ["v1.0.0", "v1.1.0"]
+    # The approved API returns ``None``.
+    assert result is None
     push_calls = [c for c in runner.calls if "push" in c]
     assert len(push_calls) == 1
     recorded = push_calls[0]
-    assert "v1.0.0" in recorded
-    assert "v1.1.0" in recorded
+    # The tag push uses ``--tags`` rather than per-tag argv.
+    assert "--tags" in recorded
+    # The redaction routine must run on the command line surfaced via
+    # the logger; the raw argv forwarded to git contains the token so
+    # git can authenticate.
+    joined_log = " ".join(record.getMessage() for record in caplog.records)
+    assert TOKEN_SENTINEL not in joined_log, (
+        f"raw token leaked into log line: {joined_log!r}"
+    )
 
 
 def test_tag_push_failure_raises_git_tag_push_error(tmp_path: Any) -> None:
@@ -552,44 +622,17 @@ def test_tag_push_failure_raises_git_tag_push_error(tmp_path: Any) -> None:
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
-    local_path = fs_factory.created[0]
+    local_path = str(tmp_path / "mirror")
 
     with pytest.raises(Exception) as exc_info:
-        mirror.push_tags(local_path, tags=["v1.0.0"], token=TOKEN_SENTINEL)
+        mirror.push_tags(local_path)
 
     cls_name = type(exc_info.value).__name__
     assert "GitTagPushError" in cls_name
-
-
-def test_tag_name_containing_token_is_redacted(tmp_path: Any) -> None:
-    """A tag whose name accidentally embeds the token is redacted in any
-    logged command line.
-
-    Mirrors spec 11.3: ``Tags whose names contain the token substring are
-    redacted in any logged command line.``
-    """
-    runner = _FakeRunner()
-    fs_factory = _mkdtemp_under(tmp_path)
-
-    mirror = GitMirror(
-        source_url="https://codeberg.org/owner/repo.git",
-        target_url="https://github.com/owner/target.git",
-        command_runner=runner,
-        tempdir_factory=fs_factory,
-    )
-    local_path = fs_factory.created[0]
-    bad_tag = f"v1.0-{TOKEN_SENTINEL}"
-
-    # Capture log records so we can inspect what was emitted.
-    with pytest.raises(Exception) as exc_info:
-        mirror.push_tags(local_path, tags=[bad_tag], token=TOKEN_SENTINEL)
-
-    text = str(exc_info.value)
-    # Tag-name token leak must be redacted.
-    assert TOKEN_SENTINEL not in text
 
 
 # ---------------------------------------------------------------------------
@@ -612,17 +655,18 @@ def test_url_token_is_redacted_in_logged_command(tmp_path: Any, caplog: Any) -> 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
-    local_path = fs_factory.created[0]
+    local_path = str(tmp_path / "mirror")
 
     caplog.set_level(logging.INFO)
 
-    # Branch push with an explicit token argument. The construction of the
-    # internal target URL must include the ``x-access-token:TOKEN@`` form
-    # so the redaction routine has work to do.
-    mirror.push_branches(local_path, refs=["main"], token=TOKEN_SENTINEL)
+    # Branch push with the token owned by the instance. The construction
+    # of the internal target URL must include the ``x-access-token:TOKEN@``
+    # form so the redaction routine has work to do.
+    mirror.push_branches(local_path)
 
     # Every log line produced must have run through the redaction routine.
     for record in caplog.records:
@@ -660,13 +704,14 @@ def test_extra_header_token_is_redacted_in_command(tmp_path: Any) -> None:
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
-    local_path = fs_factory.created[0]
+    local_path = str(tmp_path / "mirror")
 
     with pytest.raises(Exception) as exc_info:
-        mirror.push_branches(local_path, refs=["main"], token=TOKEN_SENTINEL)
+        mirror.push_branches(local_path)
 
     text = str(exc_info.value)
     assert TOKEN_SENTINEL not in text
@@ -711,6 +756,7 @@ def test_clone_failure_advice_has_cause_remediation_and_docs_pointer(
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
@@ -743,11 +789,14 @@ def test_clone_failure_advice_has_cause_remediation_and_docs_pointer(
 
 
 def test_tag_push_failure_advice_references_tag_and_retry(tmp_path: Any) -> None:
-    """A tag push failure emits an advice block that references the tag
-    name and the retry strategy.
+    """A tag push failure emits an advice block that references the
+    ``tag push`` action and the retry strategy.
 
-    Mirrors spec 11.5: ``A tag push failure emits an advice block
-    referencing the tag name and the retry strategy.``
+    Mirrors spec 11.5 (amended per stage-03 §3.5): because the new
+    ``push_tags`` pushes all tags in one ``--tags`` command, the
+    advisory refers to "tag push" generically rather than to a
+    specific tag name. The test asserts the substring ``"tag push"``
+    and either ``"retry"`` or ``"again"``.
     """
     cpe = _make_cpe(
         cmd=[
@@ -767,16 +816,17 @@ def test_tag_push_failure_advice_references_tag_and_retry(tmp_path: Any) -> None
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
-    local_path = fs_factory.created[0]
+    local_path = str(tmp_path / "mirror")
 
     with pytest.raises(Exception) as exc_info:
-        mirror.push_tags(local_path, tags=["v1.0.0"], token=TOKEN_SENTINEL)
+        mirror.push_tags(local_path)
 
     text = str(exc_info.value)
-    assert "v1.0.0" in text
+    assert "tag push" in text
     assert "retry" in text.lower() or "again" in text.lower()
 
 
@@ -811,13 +861,14 @@ def test_non_fast_forward_advice_recommends_rebase_or_force_with_lease(
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
-    local_path = fs_factory.created[0]
+    local_path = str(tmp_path / "mirror")
 
     with pytest.raises(Exception) as exc_info:
-        mirror.push_branches(local_path, refs=["main"], token=TOKEN_SENTINEL)
+        mirror.push_branches(local_path)
 
     text = str(exc_info.value)
     assert "git pull --rebase" in text or "rebase" in text.lower()
@@ -861,6 +912,7 @@ def test_clone_failure_is_terminal_no_github_api_call_after(
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
@@ -908,13 +960,14 @@ def test_branch_push_failure_is_nonfatal_does_not_abort(tmp_path: Any) -> None:
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
-    local_path = fs_factory.created[0]
+    local_path = str(tmp_path / "mirror")
 
     with pytest.raises(Exception) as exc_info:
-        mirror.push_branches(local_path, refs=["main"], token=TOKEN_SENTINEL)
+        mirror.push_branches(local_path)
 
     exc = exc_info.value
     cls_name = type(exc).__name__
@@ -951,13 +1004,14 @@ def test_tag_push_failure_is_nonfatal_for_issue_migration(tmp_path: Any) -> None
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
         command_runner=runner,
         tempdir_factory=fs_factory,
     )
-    local_path = fs_factory.created[0]
+    local_path = str(tmp_path / "mirror")
 
     with pytest.raises(Exception) as exc_info:
-        mirror.push_tags(local_path, tags=["v1.0.0"], token=TOKEN_SENTINEL)
+        mirror.push_tags(local_path)
 
     exc = exc_info.value
     cls_name = type(exc).__name__
