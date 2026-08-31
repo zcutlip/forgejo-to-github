@@ -160,20 +160,24 @@ client applies them. Earlier rules win:
 |---|--------------------|---------------|
 | 1 | 2xx with valid payload | normal return |
 | 2 | 429 | `GitHubRateLimitError` with `retry_after: int | None`. Retried up to 3 times within the client before giving up. |
-| 3 | 403 with `X-RateLimit-Remaining: 0` (header present and zero) | `GitHubRateLimitError` carrying `reset: int | None`. Retried up to 3 times within the client. |
+| 3 | 403 with `X-RateLimit-Remaining: 0` (header present and zero) | `GitHubRateLimitError` carrying `reset: int | None`. Not retried; raised immediately on the single response. |
 | 4 | 401 | `GitHubAuthError` |
 | 5 | 403 (other than 3 above) | `GitHubAuthError` |
 | 6 | 422 | `GitHubValidationError` carrying parsed `errors` from the response body |
 | 7 | 5xx | `GitHubTransportError` |
 | 8 | Underlying transport raises | `GitHubTransportError` |
 
-The retry/backoff behavior for 429 / 403-with-zero-remaining lives
-inside the GitHub client, not the orchestrator. After three attempts,
-the client raises `GitHubRateLimitError`. The test
+The retry/backoff behavior for 429 lives inside the GitHub client, not
+the orchestrator. After three attempts on 429, the client raises
+`GitHubRateLimitError`. The test
 `test_rate_limit_429_is_retried_then_terminates_with_rate_limit_error`
 asserts that exactly three POST attempts are issued before the client
 gives up. The retry policy between attempts is implementation-defined
 (but bounded by the 3-attempt cap) and not part of the public contract.
+A 403 with `X-RateLimit-Remaining: 0` is not retried; the client raises
+`GitHubRateLimitError` immediately on the single response. The test
+`test_403_with_zero_rate_limit_remaining_raises_rate_limit_error`
+asserts exactly one POST attempt before the raise.
 
 Headers (production default adapter only; the test fake observes
 whatever headers the client constructs):
