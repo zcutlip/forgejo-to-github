@@ -242,12 +242,39 @@ Fields (these names are part of the contract asserted by
 | `comments_succeeded` | `int` | Total comments posted successfully. |
 | `comments_failed` | `int` | Total comments that failed. |
 | `git` | `dict[str, str]` | `{"clone": "...", "push": "..."}`. Values are one of `"ok"`, `"failed"`, `"skipped"`. `"skipped"` means the phase was not attempted (either `--skip-git` or `--dry-run`). |
-| `failures` | `list[IssueFailure]` | Per-issue structured failures. See §3.8. |
+| `failures` | `list[IssueFailure]` | Per-issue structured failures. See §3.9. |
 | `clone_status` | `str` | Convenience alias for `git["clone"]`; some tests reach for it. |
 | `push_status` | `str` | Convenience alias for `git["push"]`; some tests reach for it. |
 | `dry_run` | `bool` | True when `repo.dry_run` was set; included for reporter clarity. |
 
-### 3.8 `IssueFailure`
+### 3.8 Repository description policy
+
+The repository description policy is owned entirely by `MigrationOrchestrator`.
+This section is the single source of truth; the API clients (`02-api-clients.md`)
+and the CLI wiring (`06-cli-wiring.md`) defer to it.
+
+The policy, in order of precedence:
+
+1. **Explicit `--description` wins.** If `repo.description` is non-empty, it is
+   used. The orchestrator calls `github.update_repository_description(...)`
+   immediately after repository creation.
+2. **Otherwise, use the Codeberg description.** When no explicit description
+   was supplied and the target repo did not exist, the orchestrator fetches
+   the source description via `codeberg.get_repository_description()` and
+   passes it to `github.create_repository(...)`.
+3. **Do not PATCH on fetch failure.** On HTTP failure of the source description
+   fetch, the orchestrator logs a one-line warning and falls back to
+   `"Migrated from Codeberg"`. No `update_repository_description` call is
+   issued.
+4. **Do not PATCH on `--dry-run`.** Under `--dry-run`, no HTTP request and no
+   state write is performed for the description; the dry-run short-circuit
+   applies.
+
+If the target repo already exists, neither fetching the source description nor
+calling `update_repository_description` is performed, regardless of whether
+`--description` was supplied.
+
+### 3.9 `IssueFailure`
 
 Plain `@dataclass`:
 
@@ -265,14 +292,14 @@ tests that look for `{"kind": str, "source_number": int, "message": str}`
 in failures continue to find those keys via attribute access. The
 dataclass preserves the field names.
 
-### 3.9 No factory method
+### 3.10 No factory method
 
 The orchestrator does **not** provide a `build(...)` classmethod or
 `from_args(...)` constructor. The CLI is the only place that
 constructs concrete collaborators. The reporter and clients are not
 instantiated by the orchestrator.
 
-### 3.10 Label color defaulting
+### 3.11 Label color defaulting
 
 The orchestrator owns the documented label color default
 (`DEFAULT_LABEL_COLOR = "ededed"`). When the source label lacks a

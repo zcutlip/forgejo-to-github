@@ -208,29 +208,27 @@ the conflict rather than improvising.
     `EXIT_SUCCESS` (0) regardless of underlying state.
 
 - **Checkpoint schema.** A checkpoint is one entry per Codeberg issue.
-  Each entry is an `IssueCheckpoint` dataclass with at minimum:
+  Each entry is an `IssueCheckpoint` dataclass:
 
   ```python
   @dataclass(frozen=True)
   class IssueCheckpoint:
       source_number: int
       github_number: int
-      comments_posted: int     # count of successfully posted comments
-      last_comment_id: int     # GitHub comment id of last posted comment; 0 if none
-      state: str               # "open" | "closed" | "partial"
-      closed: bool             # whether github.close_issue was issued successfully
+      state: str
+      closed: bool
   ```
 
   `MigrationState.migrated: dict[int, int]` is preserved in name for
   backward compatibility with the legacy on-disk format but the new
   in-memory `MigrationState` is `dict[int, IssueCheckpoint]`. The
   on-disk format remains `{"source": ..., "target": ..., "migrated":
-  {"<src>": <gh>}}` where the value is the GitHub issue number. The
-  comments-progress information is **not** persisted in this revision.
+  {"<src>": <gh>}}` where the value is the GitHub issue number.
+  Per-comment progress is not persisted; the GitHub API does not
+  provide per-issue atomicity, and plan 02 does not introduce one.
   Resume of a partially-completed issue re-runs all comments and
-  re-issues the close. This is a deliberate simplification. (See
-  `01-state-store.md` §3.1 for the schema rationale and the user
-  approval recorded for this simplification.)
+  re-issues the close. (See `01-state-store.md` §3.1 for the schema
+  rationale and the user approval recorded for this simplification.)
 
 - **Pre-commit configuration.** `.pre-commit-config.yaml`,
   `pyproject.toml`, and any CI configuration are not modified by this

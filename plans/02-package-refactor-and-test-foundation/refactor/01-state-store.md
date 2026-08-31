@@ -50,6 +50,7 @@ Frozen dataclasses. Plain Python dataclass, no pydantic, no attrs.
 class IssueCheckpoint:
     source_number: int
     github_number: int
+    state: str
     closed: bool
 
 @dataclass(frozen=True)
@@ -67,18 +68,18 @@ Field notes:
   `IssueCheckpoint` records.
 - The on-disk JSON serialization reduces `migrated` to a flat
   `dict[str, int]` mapping source issue number (as a string) to GitHub
-  issue number. The `closed` field is **not** persisted in this
-  revision. On reload, `closed` is reconstructed as `True` if and only
-  if the source issue's `state == "closed"` is encountered later by the
-  orchestrator; the first reload yields `closed=False` for all entries.
-  The on-disk format therefore remains
+  issue number. The `state` and `closed` fields are **not** persisted
+  in this revision. On reload, `closed` is reconstructed as `False`
+  for all entries. The on-disk format therefore remains
   `{"source": ..., "target": ..., "migrated": {"<src>": <gh>}}`,
   which is the legacy format produced by `f2gh.save_state`.
-- The decision to omit per-issue comment progress and `closed` from
-  disk is a deliberate simplification. **Resume of a partially
-  completed issue re-creates all comments and re-issues the close.**
-  This is approved at the spec-review step; it is the locked behavior
-  for this plan.
+- The decision to omit per-issue comment progress from `IssueCheckpoint`
+  is a deliberate simplification. The GitHub API does not provide
+  per-issue atomicity (there is no way to roll back a partially posted
+  issue), and per-comment progress persistence is not a goal of plan
+  02. **Resume of a partially completed issue re-creates all comments
+  and re-issues the close.** This is approved at the spec-review step;
+  it is the locked behavior for this plan.
 
 ### 3.2 `StateStore`
 

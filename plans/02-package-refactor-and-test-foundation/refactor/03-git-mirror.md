@@ -284,6 +284,9 @@ by `GitMirror` directly; logging is the orchestrator's concern (stage
 - `tests/test_git_service.py::test_tag_push_failure_raises_git_tag_push_error`
 - `tests/test_git_service.py::test_url_token_is_redacted_in_logged_command`
 - `tests/test_git_service.py::test_extra_header_token_is_redacted_in_command`
+- `to be added`: `test_every_git_command_line_passes_through_redaction` —
+  a property-style test asserting that any command line emitted by
+  `GitMirror` is passed through the redaction helper.
 - `tests/test_git_service.py::test_clone_failure_advice_has_cause_remediation_and_docs_pointer`
 - `tests/test_git_service.py::test_tag_push_failure_advice_references_tag_and_retry`
 - `tests/test_git_service.py::test_non_fast_forward_advice_recommends_rebase_or_force_with_lease`

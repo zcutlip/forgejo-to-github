@@ -212,33 +212,7 @@ and is asserted to carry `err.issue_number == 99` and
 
 ### 3.5 Repository description behavior
 
-The orchestrator is the single owner of description policy. The
-client's `get_repository_description()` returns the literal
-`description` field of the GET response, coerced to an empty string
-when missing or `null`. **It does not fall back to `"Migrated from
-Codeberg"`.** That fallback is the orchestrator's responsibility, and
-it is also conditioned on the HTTP call succeeding.
-
-The client's `update_repository_description(description)` issues a
-PATCH whenever called. The orchestrator is the single place that
-decides when to call it:
-
-- If `repo.description` is non-empty, the orchestrator calls
-  `update_repository_description` with that value (after repo
-  creation).
-- If `repo.description` is empty and the target repo did not exist
-  before, the orchestrator fetches the source description; if the
-  fetch returns non-empty, the orchestrator passes it to
-  `create_repository`; if the fetch returns empty, the orchestrator
-  uses `"Migrated from Codeberg"`. No `update_repository_description`
-  call is made in either sub-case.
-- If `repo.description` is empty and the target repo already existed,
-  the orchestrator does not call `update_repository_description` and
-  does not fetch the source description.
-- On `codeberg.get_repository_description()` HTTP failure (transport
-  error, 5xx, etc.), the orchestrator uses `"Migrated from Codeberg"`
-  and logs a one-line warning. The fetch error does not become a
-  migration failure.
+Policy is defined in `04-orchestrator.md` 3.8.
 
 `tests/test_repository_description.py` is rewritten in stage 06 to
 drive `MigrationOrchestrator` directly; the four end-state contracts
