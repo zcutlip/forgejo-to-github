@@ -53,11 +53,14 @@ from __future__ import annotations
 import logging
 import subprocess
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
 import pytest
 
-from forgejo_to_github.git import GitMirror  # RED: ImportError until module lands.
+from forgejo_to_github.git import (  # RED: ImportError until module lands.
+    GitCloneError,
+    GitMirror,
+)
 
 # ---------------------------------------------------------------------------
 # Test fakes / helpers
@@ -136,21 +139,6 @@ class _FakeRunner:
 
         # Default: success.
         return _FakeCompletedProcess(args=args, returncode=0, stdout="", stderr="")
-
-
-class _FilesystemFactory(Protocol):
-    """Filesystem / tempdir factory accepted by ``GitMirror``.
-
-    The protocol intentionally matches ``tempfile.mkdtemp``'s signature so
-    implementations can pass through, but tests can substitute a deterministic
-    factory that returns a path inside ``tmp_path``. The ``created`` attribute
-    is a list of paths the factory has produced, used by tests to recover the
-    working directory between phases.
-    """
-
-    created: list[str]
-
-    def __call__(self, suffix: str | None = None, prefix: str | None = None) -> str: ...
 
 
 @dataclass
@@ -917,7 +905,7 @@ def test_clone_failure_is_terminal_no_github_api_call_after(
         tempdir_factory=fs_factory,
     )
 
-    with pytest.raises(Exception):
+    with pytest.raises(GitCloneError):
         mirror.clone()
 
     # Only the clone call is allowed; no push-shaped call is permitted.

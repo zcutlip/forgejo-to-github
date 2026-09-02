@@ -28,6 +28,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+
 from forgejo_to_github.migration import MigrationOrchestrator
 
 # --- helpers ---------------------------------------------------------------
@@ -275,7 +276,7 @@ def test_clone_failure_is_terminal_and_skips_issue_migration():
 
     orch, _fakes = _build(api=api, git=git, state=state, report=report)
 
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError):
         orch.run()
 
     create_calls = [c for c in api.calls if c[0] == "create_issue"]
