@@ -102,8 +102,8 @@ def _build_orchestrator(args: argparse.Namespace) -> MigrationOrchestrator:
             raise SystemExit(
                 f"invalid source/target: {label} must be OWNER/REPO, got {value!r}"
             )
-        owner, repo = value.split("/", 1)
-        if not owner or not repo:
+        owner, repo_name = value.split("/", 1)
+        if not owner or not repo_name:
             raise SystemExit(
                 f"invalid source/target: {label} must be OWNER/REPO, got {value!r}"
             )
