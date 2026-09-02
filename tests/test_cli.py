@@ -222,9 +222,9 @@ def test_main_invokes_parse_args_then_orchestrator_flow() -> None:
         patch.object(
             f2gh.sys, "exit", side_effect=SystemExit(sentinel_exit_code)
         ) as mock_exit,
+        pytest.raises(SystemExit) as exc_info,
     ):
-        with pytest.raises(SystemExit) as exc_info:
-            f2gh.main()
+        f2gh.main()
 
     # Exits with the code returned by reporter.exit_outcome(result).
     assert exc_info.value.code == sentinel_exit_code
