@@ -159,6 +159,7 @@ class Reporter:
 
         issues_succeeded = _get_field(result, "issues_succeeded", 0)
         issues_attempted = _get_field(result, "issues_attempted", 0)
+        issues_discovered = _get_field(result, "issues_discovered", 0)
         comments_succeeded = _get_field(result, "comments_succeeded", 0)
         comments_attempted = _get_field(result, "comments_attempted", 0)
 
@@ -196,10 +197,12 @@ class Reporter:
 
         if dry_run:
             # Dry-run template: must contain "dry-run", must not contain
-            # "migrated" or "complete" as a success claim.
+            # "migrated" or "complete" as a success claim. Discovery is
+            # not an attempt: the count comes from ``issues_discovered``
+            # (``issues_attempted`` stays 0 on a dry run).
             dry_lines = [
                 "Dry-run complete — no changes were made.",
-                f"dry-run: would process {issues_attempted} issues",
+                f"dry-run: would process {issues_discovered} issues",
             ]
             # Also include git status as skipped for transparency without using migrated.
             dry_lines.append(f"Git: clone {clone_status}, push {push_status} (dry-run)")

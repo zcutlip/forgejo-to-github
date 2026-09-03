@@ -9,11 +9,18 @@ subprocess work of its own.
 Phase ordering
 --------------
 
-1. **Dry-run short-circuit.** When ``repo.dry_run`` is set, the
-   orchestrator returns a default :class:`MigrationResult` with all
-   counters at zero, ``git`` set to ``{"clone": "skipped", "push":
-   "skipped"}``, no failures, and ``dry_run=True``. No collaborator
-   is invoked.
+1. **Dry-run read-only discovery.** When ``repo.dry_run`` is set,
+   the orchestrator skips phases 2–5 and instead performs read-only
+   discovery through the injected collaborator APIs: a GET-only target
+   repository status check, a policy-gated source description fetch,
+   and the source issue listing. No mutating request is issued, no git
+   subprocess is spawned, and no state is loaded or written. The
+   returned :class:`MigrationResult` keeps every migration counter at
+   zero (``issues_attempted == 0``: discovery is not an attempt),
+   carries the discovered source issue count in ``issues_discovered``,
+   leaves ``git`` at ``{"clone": "skipped", "push": "skipped"}``, has
+   no failures, and sets ``dry_run=True``. The reporter is not called
+   during a dry-run; the CLI owns the dry-run final summary.
 2. **Git mirror.** When ``repo.skip_git`` is not set, the orchestrator
    invokes the injected Git seam's ``run_clone()`` and then
    ``run_push()``. A clone failure is terminal: the exception
@@ -160,13 +167,11 @@ class MigrationOrchestrator:
         propagates; on push or per-issue failure, the failure is
         accumulated into the result and the run continues.
         """
-        # Phase 1: dry-run short-circuit. No collaborator is invoked.
+        # Phase 1: dry-run read-only discovery. GET requests only — no
+        # mutating HTTP, no git subprocess, no state load or write, and
+        # no reporter calls. The CLI owns the dry-run summary emission.
         if bool(getattr(self.repo, "dry_run", False)):
-            result = MigrationResult(dry_run=True)
-            # git defaults are already {"clone": "skipped", "push":
-            # "skipped"}; clone_status/push_status are aliases set to
-            # the same values by the dataclass factory.
-            return result
+            return self._discover_dry_run()
 
         result = MigrationResult()
 
@@ -184,6 +189,59 @@ class MigrationOrchestrator:
         # phase (or skipped-Git), regardless of push outcome.
         self._migrate_issues(result)
 
+        return result
+
+    # --- dry-run read-only discovery -----------------------------------------
+
+    def _discover_dry_run(self) -> MigrationResult:
+        """Perform the dry-run read-only discovery phase.
+
+        Contract (``plans/02-package-refactor-and-test-foundation/
+        refactor/04-orchestrator.md`` §3.2 step 1 and the approved
+        dry-run decision in ``00-index.md``):
+
+        - Only GET requests are issued, via the injected concrete
+          collaborator APIs: the GitHub target repository status check
+          (``github.check_repository_exists``) and the Codeberg source
+          issue listing (``codeberg.list_issues``). The source
+          description is fetched only under the approved description
+          policy: when the target does not yet exist and no explicit
+          ``--description`` was supplied.
+        - No mutating HTTP request, no git subprocess, and no state
+          load or ``StateStore.save`` call occurs. The result is a
+          fresh ``MigrationResult`` and no orchestrator state is
+          mutated.
+        - Discovery is recorded separately from the attempt counters:
+          ``issues_discovered`` carries the source issue count while
+          ``issues_attempted`` stays ``0``, no migration object is
+          created, and the reporter is never called.
+
+        Errors raised by the discovery calls are represented by the
+        clients' existing error hierarchy and propagate unchanged —
+        the orchestrator neither swallows them nor mutates state.
+        """
+        result = MigrationResult(dry_run=True)
+
+        # Target repository status check (GET). Missing targets surface
+        # in the dry-run summary as ``clone``/``push`` skipped — repo
+        # creation is *not* part of discovery.
+        target_repo: Any = None
+        check = getattr(self.github, "check_repository_exists", None)
+        if callable(check):
+            target_repo = check()  # repo dict on 200, None on 404
+
+        # Source description fetch is policy-gated (spec §3.8 rules 2
+        # and 4): only when the target repository does not yet exist
+        # and no explicit description override was supplied.
+        if target_repo is None and not getattr(self.repo, "description", None):
+            description_fn = getattr(self.codeberg, "get_repository_description", None)
+            if callable(description_fn):
+                description_fn()
+
+        # Source issue listing (GET, paginated). The discovered count
+        # is recorded without incrementing any attempt counter.
+        issues = self._list_issues()
+        result.issues_discovered = len(issues)
         return result
 
     # --- public phase entry points -------------------------------------------

@@ -32,8 +32,9 @@ class Repository:
         description: Optional explicit description override.
         public: When ``True``, create the target repository as public.
         skip_git: When ``True``, skip the Git mirror phase entirely.
-        dry_run: When ``True``, perform no HTTP or subprocess work and
-            emit no checkpoints.
+        dry_run: When ``True``, the run is read-only, not offline: only
+            GET discovery requests are issued — no mutating HTTP, no
+            git subprocess, and no checkpoint writes.
         yes: When ``True``, skip any interactive confirmation prompts.
     """
 
@@ -81,11 +82,17 @@ class MigrationResult:
     The ``git`` mapping carries the per-phase status (``"ok"``,
     ``"failed"``, or ``"skipped"``) and ``clone_status`` /
     ``push_status`` are convenience aliases that mirror its entries.
+
+    ``issues_discovered`` is recorded only by the dry-run read-only
+    discovery phase: it carries the number of source issues found by
+    the read-only listing while ``issues_attempted`` stays ``0``
+    (discovery is not an attempt). It remains ``0`` on normal runs.
     """
 
     issues_attempted: int = 0
     issues_succeeded: int = 0
     issues_failed: int = 0
+    issues_discovered: int = 0
     comments_attempted: int = 0
     comments_succeeded: int = 0
     comments_failed: int = 0
