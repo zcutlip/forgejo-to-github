@@ -66,29 +66,50 @@ class _FakeCodeberg:
 
 
 class _FakeGitHub:
+    """Fake GitHub seam aligned to concrete GitHubClient signatures.
+
+    Approved API-alignment (2026-09-02): signatures match
+    ``create_issue(title, body, labels) -> int`` and
+    ``create_comment(github_number, body) -> int`` without dual
+    compatibility branches. Recording preserves source numbers for
+    ordering assertions; failure injection still uses source numbers.
+    """
+
     def __init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
         self._fail_create: set[int] = set()
         self._next_number = 4242
+        self._github_to_source: dict[int, int] = {}
 
     def fail_on_create(self, source_number: int) -> None:
         self._fail_create.add(int(source_number))
 
-    def create_issue(self, payload: dict[str, Any]) -> dict[str, Any]:
-        number = int(payload["number"])
-        self.calls.append(("create_issue", str(number)))
-        if number in self._fail_create:
+    def create_issue(self, title: str, body: str, labels: list[str]) -> int:
+        # Derive source number from the issue payload content (body
+        # carries "body for {n}" via _issue helper) so resume filtering
+        # is correctly recorded even when the first enumerated issue is
+        # skipped as already_migrated.
+        source_number: int | None = None
+        if isinstance(body, str):
+            token = body.strip().split()[-1] if body.strip() else ""
+            try:
+                source_number = int(token)
+            except (ValueError, TypeError):
+                source_number = None
+        if source_number is None:
+            # Fallback: sequential count (only used if body lacks number)
+            source_number = len([c for c in self.calls if c[0] == "create_issue"]) + 1
+        self.calls.append(("create_issue", str(source_number)))
+        if source_number in self._fail_create:
             raise RuntimeError("500 Server Error: Internal Server Error")
-        result = {"number": self._next_number}
+        github_number = self._next_number
         self._next_number += 1
-        # also allow caller to set explicit second number via counter
-        return result
+        self._github_to_source[github_number] = source_number
+        return github_number
 
-    def create_comment(
-        self, issue_number: int, payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        self.calls.append(("create_comment", str(issue_number)))
-        return {"id": 1}
+    def create_comment(self, github_number: int, body: str) -> int:
+        self.calls.append(("create_comment", str(github_number)))
+        return 1
 
     def close_issue(self, issue_number: int) -> None:
         self.calls.append(("close_issue", str(issue_number)))
