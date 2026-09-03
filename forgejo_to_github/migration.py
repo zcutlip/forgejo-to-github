@@ -197,9 +197,76 @@ class MigrationOrchestrator:
         can drive the repository phase independently of issue
         migration when needed (e.g., to test the Git phase in
         isolation).
+
+        Git lifecycle (concrete ``GitMirror``)
+        --------------------------------------
+        The concrete ``GitMirror`` API is ``clone() -> str``,
+        ``push_branches(local_path)``, ``push_tags(local_path)`` and
+        ``cleanup(local_path)``. ``cleanup`` is guaranteed to run in a
+        ``finally`` block after a successful ``clone``, even when a
+        push fails. This ordering is asserted by
+        ``tests/test_concrete_integration.py``.
+
+        Test seam
+        ---------
+        To keep the fake-based orchestration tests in
+        ``tests/test_orchestration.py`` passing without hiding the
+        concrete path, this method detects the concrete API by the
+        presence of a callable ``clone`` attribute. When ``clone`` is
+        present the concrete lifecycle above is used. Otherwise it
+        falls back to the legacy ``run_clone``/``run_push`` seam used
+        only by those fakes. The fallback is narrow and documented
+        here; no broad dual-API complexity is introduced.
         """
-        # Clone is terminal. Any raise propagates out of ``run`` and
-        # the result is never returned to the caller for this run.
+        # Concrete GitMirror path — preferred. Detected by presence of
+        # callable ``clone`` so the concrete lifecycle is never hidden
+        # when a real GitMirror is injected.
+        clone_fn = getattr(self.git, "clone", None)
+        if callable(clone_fn):
+            # Clone is terminal. Any raise propagates out of ``run``
+            # and the result is never returned to the caller for this run.
+            local_path = clone_fn()
+            result.git["clone"] = "ok"
+            result.clone_status = "ok"
+
+            push_failed = False
+            try:
+                # Branch push is non-fatal; continue to tag push even on failure.
+                try:
+                    push_branches = getattr(self.git, "push_branches", None)
+                    if callable(push_branches):
+                        push_branches(local_path)
+                except Exception:  # noqa: BLE001 — non-fatal branch push
+                    push_failed = True
+
+                try:
+                    push_tags = getattr(self.git, "push_tags", None)
+                    if callable(push_tags):
+                        push_tags(local_path)
+                except Exception:  # noqa: BLE001 — non-fatal tag push
+                    push_failed = True
+
+                if push_failed:
+                    result.git["push"] = "failed"
+                    result.push_status = "failed"
+                    self._safe_git_phase_finished("failed")
+                else:
+                    result.git["push"] = "ok"
+                    result.push_status = "ok"
+                    self._safe_git_phase_finished("ok")
+            finally:
+                # cleanup runs even after push failures, after successful clone
+                cleanup_fn = getattr(self.git, "cleanup", None)
+                if callable(cleanup_fn):
+                    try:
+                        cleanup_fn(local_path)
+                    except Exception:  # noqa: BLE001 — best-effort cleanup
+                        pass
+            return
+
+        # Legacy fallback for tests/test_orchestration.py _FakeGit
+        # (run_clone/run_push). Kept narrow; concrete path above is not
+        # hidden when clone exists.
         self.git.run_clone()
         result.git["clone"] = "ok"
         result.clone_status = "ok"
