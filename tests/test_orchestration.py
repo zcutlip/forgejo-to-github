@@ -765,3 +765,257 @@ def test_dry_run_reports_discovered_issue_count() -> None:
         '("would process 2 issues"), not zero; got:\n'
         f"{joined}"
     )
+
+
+# ===========================================================================
+# RED class: D. Informative dry-run preview (append-only)
+# ===========================================================================
+#
+# Contract (user-approved, Option B): the dry-run summary must be an
+# informative preview of what a real run would do — the target
+# repository name, whether the target would be created or already
+# exists, and the checkpoint status of the existing state file.
+# Discovery facts are carried on the result via the approved
+# ``DryRunDiscovery`` value (``result.discovery``) with fields
+# ``target``, ``repo_exists``, ``comments_discovered``, ``state_path``,
+# and ``state_migrated``. Rendering stays read-only: GET-only HTTP, no
+# git subprocess, and the state file is loaded but never written.
+#
+# RED-stage expectation: both tests fail against the current
+# implementation because ``MigrationResult`` carries no ``discovery``
+# field and the dry-run template renders none of the new lines.
+
+
+class _ScriptedPreviewTransport:
+    """Recording transport scripted for the informative dry-run preview.
+
+    Routes the GET endpoints the preview depends on, with a
+    configurable target-repository existence (404 => missing, 200 =>
+    existing). Every request is recorded so tests can assert the
+    read-only method boundary; non-GET requests are answered with a
+    benign 201 so the read-only assertion stays the single failure
+    reason.
+    """
+
+    def __init__(
+        self,
+        issues: list[dict[str, Any]],
+        *,
+        target_exists: bool,
+    ) -> None:
+        self.issues: list[dict[str, Any]] = list(issues)
+        self.target_exists: bool = target_exists
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        json_body: Any | None = None,
+        timeout: float | None = None,
+    ) -> _FakeResponse:
+        self.calls.append((method, url))
+        if method != "GET":
+            # Write paths must never be reached during a dry run.
+            return _FakeResponse(201, {"number": 101, "id": 1001})
+        if url.endswith("/repos/owner/target"):
+            # GitHub target repository existence check.
+            if self.target_exists:
+                return _FakeResponse(200, {"name": "target"})
+            return _FakeResponse(404, {"message": "Not Found"})
+        if "/repos/owner/source/issues" in url and "/comments" not in url:
+            page = int((params or {}).get("page", 1))
+            return _FakeResponse(200, list(self.issues) if page == 1 else [])
+        # Source repository description and anything else is inert.
+        return _FakeResponse(200, {})
+
+
+# --- D.1 dry-run summary previews the target-repository outcome -------------
+
+
+def test_dry_run_summary_reports_target_and_repo_status() -> None:
+    """The dry-run summary must preview the target-repository outcome.
+
+    Missing target (GET 404) => the summary names the target repo and
+    says it would be created; existing target (GET 200) => the summary
+    says the repo is existing. Both cases stay read-only: only GET
+    requests are issued and the git seam is never touched.
+    """
+    # Missing target: the summary must name the target and the creation.
+    transport_missing = _ScriptedPreviewTransport(
+        issues=[_issue(1)], target_exists=False
+    )
+    sink_missing = _RecordingSink()
+    reporter_missing = Reporter(output=sink_missing, error_output=sink_missing)
+    git_missing = _FakeGit()
+    orch_missing = _build_dry_run(
+        codeberg=CodebergClient(
+            "https://codeberg.org", "owner", "source", None, transport=transport_missing
+        ),
+        github=GitHubClient(
+            "https://api.github.com",
+            "owner",
+            "target",
+            None,
+            transport=transport_missing,
+        ),
+        git=git_missing,
+        state=_FakeState(),
+        reporter=reporter_missing,
+    )
+
+    result_missing = orch_missing.run()
+    reporter_missing.render_final(result_missing)
+
+    discovery_missing = getattr(result_missing, "discovery", None)
+    assert discovery_missing is not None, (
+        "dry-run result must carry the approved discovery facts "
+        "(result.discovery is absent on MigrationResult); got "
+        f"{discovery_missing!r}"
+    )
+    assert discovery_missing.target == "owner/target", (
+        "discovery.target must be the target repository as owner/repo; "
+        f"got {discovery_missing.target!r}"
+    )
+    assert discovery_missing.repo_exists is False, (
+        "a 404 target check must record repo_exists=False; "
+        f"got {discovery_missing.repo_exists!r}"
+    )
+
+    joined_missing = "\n".join(sink_missing.lines)
+    assert "Target repo: owner/target" in joined_missing, (
+        'dry-run summary must contain "Target repo: owner/target"; got:\n'
+        f"{joined_missing}"
+    )
+    assert "Repo: would be created" in joined_missing, (
+        'dry-run summary must contain "Repo: would be created" for a '
+        f"missing target; got:\n{joined_missing}"
+    )
+
+    # Read-only: GET-only transport, git seam untouched.
+    non_get = [c for c in transport_missing.calls if c[0] != "GET"]
+    assert non_get == [], f"dry run is read-only; only GET allowed; got {non_get!r}"
+    assert git_missing.clone_called is False
+    assert git_missing.push_called is False
+
+    # Existing target: the summary must say the repo is existing.
+    transport_existing = _ScriptedPreviewTransport(
+        issues=[_issue(1)], target_exists=True
+    )
+    sink_existing = _RecordingSink()
+    reporter_existing = Reporter(output=sink_existing, error_output=sink_existing)
+    orch_existing = _build_dry_run(
+        codeberg=CodebergClient(
+            "https://codeberg.org",
+            "owner",
+            "source",
+            None,
+            transport=transport_existing,
+        ),
+        github=GitHubClient(
+            "https://api.github.com",
+            "owner",
+            "target",
+            None,
+            transport=transport_existing,
+        ),
+        git=_FakeGit(),
+        state=_FakeState(),
+        reporter=reporter_existing,
+    )
+
+    result_existing = orch_existing.run()
+    reporter_existing.render_final(result_existing)
+
+    discovery_existing = getattr(result_existing, "discovery", None)
+    assert discovery_existing is not None, (
+        "dry-run result must carry the approved discovery facts "
+        "(result.discovery is absent on MigrationResult); got "
+        f"{discovery_existing!r}"
+    )
+    assert discovery_existing.repo_exists is True, (
+        "a 200 target check must record repo_exists=True; "
+        f"got {discovery_existing.repo_exists!r}"
+    )
+
+    joined_existing = "\n".join(sink_existing.lines)
+    assert "Repo: existing" in joined_existing, (
+        'dry-run summary must contain "Repo: existing" for an existing '
+        f"target; got:\n{joined_existing}"
+    )
+
+
+# --- D.2 dry-run summary previews the checkpoint status ---------------------
+
+
+def test_dry_run_summary_reports_state_checkpoint(tmp_path: Path) -> None:
+    """The dry-run summary must preview the checkpoint status.
+
+    A valid pre-populated ``state.json`` holding one migrated mapping
+    is loaded read-only during discovery and previewed as
+    ``State: <path> (1 checkpointed)``. The run must not write or
+    mutate the file: its bytes remain unchanged and ``StateStore.save``
+    is never called.
+    """
+    state_path = tmp_path / "state.json"
+    # Prepopulate a valid checkpoint via the real StateStore write path.
+    seed_store = StateStore(state_path, "owner/source", "owner/target")
+    seed_store.save(repo_created=True, git_pushed=True, migrated={1: 101})
+    before: bytes = state_path.read_bytes()
+
+    # The run observes the spy subclass: real load behavior, but save
+    # is recorded and never reaches the write path.
+    store = _SaveSpyStateStore(state_path, "owner/source", "owner/target")
+    transport = _ScriptedPreviewTransport(issues=[_issue(1)], target_exists=True)
+    sink = _RecordingSink()
+    reporter = Reporter(output=sink, error_output=sink)
+    orch = _build_dry_run(
+        codeberg=CodebergClient(
+            "https://codeberg.org", "owner", "source", None, transport=transport
+        ),
+        github=GitHubClient(
+            "https://api.github.com", "owner", "target", None, transport=transport
+        ),
+        git=_FakeGit(),
+        state=store,
+        reporter=reporter,
+    )
+
+    result = orch.run()
+    reporter.render_final(result)
+
+    discovery = getattr(result, "discovery", None)
+    assert discovery is not None, (
+        "dry-run result must carry the approved discovery facts "
+        "(result.discovery is absent on MigrationResult); got "
+        f"{discovery!r}"
+    )
+    assert discovery.state_migrated == 1, (
+        "discovery.state_migrated must count the pre-populated "
+        f"checkpoint (1); got {discovery.state_migrated!r}"
+    )
+    assert str(discovery.state_path) == str(state_path), (
+        "discovery.state_path must be the state file path; "
+        f"got {discovery.state_path!r}"
+    )
+
+    joined = "\n".join(sink.lines)
+    assert str(state_path) in joined, (
+        f"dry-run summary must report the state file path; got:\n{joined}"
+    )
+    assert "1 checkpointed" in joined, (
+        f'dry-run summary must contain "1 checkpointed"; got:\n{joined}'
+    )
+
+    # Read-only state: file byte-identical, no save calls.
+    assert state_path.read_bytes() == before, (
+        "dry run must leave an existing state checkpoint byte-for-byte "
+        f"unchanged; before={before!r}, after={state_path.read_bytes()!r}"
+    )
+    assert store.save_calls == [], (
+        "StateStore.save must not be called during a dry run; "
+        f"recorded calls: {store.save_calls!r}"
+    )
