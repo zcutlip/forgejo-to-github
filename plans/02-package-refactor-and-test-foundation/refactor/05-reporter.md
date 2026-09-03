@@ -164,7 +164,13 @@ The final summary must obey:
    template that does not say "migrated" or "complete" and does not
    enumerate failures. The summary text contains the substring
    `"dry-run"` (per `test_dry_run_summary_does_not_claim_migrated`,
-   to be added in stage 06).
+   to be added in stage 06) and reports the discovered count via the
+   `"would process N issues"` wording driven by
+   `result.issues_discovered` (per
+   `tests/test_orchestration.py::test_dry_run_reports_discovered_issue_count`).
+   The template must not consume `issues_attempted` for this: on a
+   dry run that counter is always `0`, and discovery is reported
+   from `issues_discovered` instead.
 7. The final summary is written to `output` on success and to
    `error_output` on any failure (per the new
    `test_reporter_writes_failure_summary_to_error_sink` to be added
@@ -253,7 +259,10 @@ Added in stage 06:
 
 - `tests/test_reporting.py::test_dry_run_summary_does_not_claim_migrated` —
   asserts the dry-run summary uses the dry-run template and does not
-  contain "migrated" or "complete" as success claims.
+  contain "migrated" or "complete" as success claims. The template
+  renders the discovered count from `result.issues_discovered` using
+  the "would process N issues" wording; `issues_attempted` is always
+  `0` on a dry run and is never rendered as the dry-run count.
 
 Package boundary:
 

@@ -189,23 +189,34 @@ the conflict rather than improvising.
   refactor is defined in `06-cli-wiring.md` §6 and is invoked only with
   user approval at the stage where the amendment is needed.
 
-- **Dry-run contract.** When `repo.dry_run is True`:
+- **Dry-run contract.** When `repo.dry_run is True`, the run is
+  **read-only, not offline**:
 
-  - No HTTP request is issued against Codeberg or GitHub. Tests assert
-    no request is registered with the mock transport.
-  - No subprocess is invoked for `git clone`, `git push`, or `gh auth
-    token`. The Git phase is recorded as `skipped`. Token reads
-    (including the `gh auth token` fallback for `GITHUB_TOKEN`) are
-    **still** performed because they are local, non-network reads from
-    the environment or `gh`'s local auth state.
+  - Read-only `GET` requests to Codeberg and GitHub are permitted for
+    discovery: target repository status, source repository
+    metadata/description, and source issues. No mutating request
+    (`POST`/`PATCH`/`PUT`/`DELETE`) may be issued. Tests assert no
+    mutating request is registered with the mock transport.
+  - No git subprocess (`git clone`, `git push`) is invoked. The Git
+    phase is recorded as `skipped`. Token reads (including the `gh
+    auth token` fallback for `GITHUB_TOKEN`) are **still** performed
+    because they are local, non-network reads from the environment or
+    `gh`'s local auth state.
   - State is loaded but never written. The destination `state.json`
     must be unchanged after a dry-run that exits normally.
   - Input validation (parse_args, source/target shape) runs.
   - The orchestrator produces a `MigrationResult` whose `git["clone"]`
     and `git["push"]` are both `"skipped"`, whose failure lists are
-    empty, and whose counters are zero. The reporter's final summary
-    is the dry-run summary (no `Migrated` claims). Exit code is
-    `EXIT_SUCCESS` (0) regardless of underlying state.
+    empty, and whose migration counters are zero (`issues_attempted
+    == 0`: a dry run never enters an issue). The result additionally
+    records `issues_discovered` — the number of source issues found
+    by the read-only listing — and the result and the final report
+    must reflect that discovered count (e.g., "would process N
+    issues") rather than reporting zero. Normal-run counter semantics
+    are unchanged: `issues_discovered` is only populated on a dry
+    run. The reporter's final summary is the dry-run
+    summary (no `Migrated` claims). Exit code is `EXIT_SUCCESS` (0)
+    regardless of underlying state.
 
 - **Checkpoint schema.** A checkpoint is one entry per Codeberg issue.
   Each entry is an `IssueCheckpoint` dataclass:
@@ -318,7 +329,7 @@ future tests are labeled `to be added`.
 | 03-git-mirror | `forgejo_to_github.git` | `tests/test_git_service.py` | `test_clone_success_returns_local_path_and_records_command`, `test_clone_nonzero_exit_raises_structured_git_clone_error`, `test_clone_auth_failure_is_classified_as_git_auth_error`, `test_clone_timeout_classified_as_git_clone_timeout_error`, `test_clone_stderr_token_is_redacted_in_error_text`, `test_branch_push_success_returns_remote_ref`, `test_branch_push_failure_raises_git_push_error`, `test_branch_push_non_fast_forward_is_classified_with_advice`, `test_tag_push_success_returns_pushed_refs`, `test_tag_push_failure_raises_git_tag_push_error`, `test_tag_name_containing_token_is_redacted`, `test_url_token_is_redacted_in_logged_command`, `test_extra_header_token_is_redacted_in_command`, `test_clone_failure_advice_has_cause_remediation_and_docs_pointer`, `test_tag_push_failure_advice_references_tag_and_retry`, `test_non_fast_forward_advice_recommends_rebase_or_force_with_lease`, `test_clone_failure_is_terminal_no_github_api_call_after`, `test_branch_push_failure_is_nonfatal_does_not_abort`, `test_tag_push_failure_is_nonfatal_for_issue_migration` | — |
 | 03-git-mirror (legacy `mirror_git_repo` parity, exercised via `f2gh.py`) | `f2gh.mirror_git_repo` | `tests/test_git_errors.py` | `test_clone_network_failure_exits_with_advisory_and_no_token_leak`, `test_clone_auth_failure_mentions_codeberg_token`, `test_push_workflow_scope_rejection_emits_workflow_advisory`, `test_generic_push_failure_labeled_git_push_failed_not_clone_failed` | — |
 | 03-git-mirror (orchestrator hookup) | `forgejo_to_github.migration` | `tests/test_orchestration.py` | `test_clone_runs_before_any_issue_work`, `test_clone_failure_is_terminal_and_skips_issue_migration`, `test_push_failure_does_not_block_issue_migration` | — |
-| 04-orchestrator | `forgejo_to_github.migration` | `tests/test_orchestration.py` | all functions in `tests/test_orchestration.py` | `to be added`: `test_per_issue_checkpoint_advances_only_on_full_success`, `to be added`: `test_resume_skips_issues_already_in_state`, `to be added`: `test_result_aggregates_counts_for_reporter`, `to be added`: `test_dry_run_makes_no_http_or_subprocess_calls`, `to be added`: `test_dry_run_does_not_write_state` |
+| 04-orchestrator | `forgejo_to_github.migration` | `tests/test_orchestration.py` | all functions in `tests/test_orchestration.py` | `to be added`: `test_per_issue_checkpoint_advances_only_on_full_success`, `to be added`: `test_resume_skips_issues_already_in_state`, `to be added`: `test_result_aggregates_counts_for_reporter`, `to be added`: `test_dry_run_issues_only_get_requests`, `to be added`: `test_dry_run_makes_no_subprocess_calls`, `to be added`: `test_dry_run_does_not_write_state`, `to be added`: `test_dry_run_reports_discovered_issue_count` |
 | 04-orchestrator (truthful reporting surfaces) | `forgejo_to_github.migration` | `tests/test_migration_reporting.py` | `test_git_push_failure_is_non_fatal_and_reported`, `test_clone_failure_is_terminal_and_skips_issue_fetch`, `test_issue_failure_is_accumulated_and_later_issues_continue`, `test_successful_issues_are_checkpointed_and_resume_filters_them` | — |
 | 04-orchestrator (issue fetch error handling) | `forgejo_to_github.migration` | `tests/test_issue_fetch_errors.py` | `test_migrate_source_404_exits_gracefully` | — |
 | 04-orchestrator (combined GitHub/Codeberg API seam coverage as legacy baseline) | `f2gh` module-level functions | `tests/test_api_clients.py` | all functions in `tests/test_api_clients.py` | — |

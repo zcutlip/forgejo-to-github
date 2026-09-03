@@ -244,10 +244,10 @@ preserved are:
    when the target repo already exists, an explicit `--description`
    does not cause a `update_repository_description` call.
 8. `test_dry_run_does_not_create_repo_or_mutate_description` — under
-   `--dry-run`, no HTTP and no state writes.
+   `--dry-run`, no mutating HTTP (GET allowed) and no state writes.
 9. `test_dry_run_does_not_create_repo_when_explicit_description_given`
-   — under `--dry-run` with an explicit `--description`, no HTTP and
-   no state writes.
+   — under `--dry-run` with an explicit `--description`, no mutating
+   HTTP (GET allowed) and no state writes.
 
 ## 4. Invariants
 

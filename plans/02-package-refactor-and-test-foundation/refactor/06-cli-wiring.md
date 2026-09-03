@@ -119,10 +119,13 @@ implement any phase logic itself.
 
 ### 3.3 Dry-run override at the CLI
 
-The CLI **also** short-circuits on dry-run before constructing the
-orchestrator, so the orchestrator's own dry-run short-circuit is a
-defense-in-depth check. The CLI's pre-orchestrator dry-run behavior
-is to:
+The CLI does **not** bypass orchestrator discovery on dry-run. It
+constructs the orchestrator and calls `run()` exactly as in a normal
+run; the orchestrator's dry-run short-circuit performs the read-only
+discovery (read-only `GET` requests only; no mutating request, no git
+subprocess, no state write) and records the found issue count in
+`MigrationResult.issues_discovered` while keeping
+`issues_attempted == 0`. The CLI's dry-run behavior is to:
 
 1. Validate `args` (already done by `parse_args`).
 2. Resolve the state path and read the Codeberg/GitHub tokens.
@@ -132,9 +135,10 @@ is to:
 6. Call `sys.exit(reporter.exit_outcome(result))` (which returns
    `EXIT_SUCCESS` for dry-run).
 
-The CLI does not issue any HTTP or git subprocess during a dry-run
-because the orchestrator's dry-run short-circuit returns immediately.
-The token reads remain because they are local environment reads.
+The CLI itself issues no HTTP request and invokes no git subprocess
+during a dry-run; the read-only discovery is performed by the
+orchestrator through the injected clients. The token reads remain
+because they are local environment reads.
 
 ### 3.4 `f2gh._build_orchestrator(args: argparse.Namespace) -> MigrationOrchestrator`
 

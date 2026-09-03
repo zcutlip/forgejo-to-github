@@ -87,11 +87,23 @@ def run(self) -> MigrationResult: ...
 Top-level orchestration entry point. Performs these phases in order:
 
 1. **Dry-run short-circuit.** If `self.repo.dry_run` is `True`, skip
-   all phases 2–5 and produce a `MigrationResult` whose `git["clone"]`
-   and `git["push"]` are both `"skipped"`, whose failure lists are
-   empty, and whose counters are zero. The reporter is **not** called
-   during a dry-run. The CLI is responsible for emitting the dry-run
-   final summary (see stage 06 for the dry-run wording rules).
+   all phases 2–5 and instead perform read-only discovery by issuing
+   read-only `GET` requests for the target repository status, the
+   source repository metadata/description, and the source issues. No
+   mutating request (`POST`/`PATCH`/`PUT`/`DELETE`), no git
+   subprocess, and no state write is performed. Produce a
+   `MigrationResult` whose `git["clone"]` and `git["push"]` are both
+   `"skipped"`, whose failure lists are empty, and whose migration
+   counters are zero (`issues_attempted == 0`: a dry run never enters
+   an issue). Discovery is recorded separately from the attempt
+   counters: the result sets `issues_discovered` to the number of
+   source issues found by the read-only listing, so the result and
+   the final report reflect the discovered data rather than reporting
+   zero. Normal-run counter semantics are unchanged:
+   `issues_discovered` stays `0` outside dry-run.
+   The reporter is **not** called during a dry-run. The CLI is
+   responsible for emitting the dry-run final summary (see stage 06
+   for the dry-run wording rules).
 2. **Pre-flight.** If `self.repo.target` does not yet exist on
    GitHub, fetch the source repository description (via
    `codeberg.get_repository_description()`) when no explicit
@@ -235,9 +247,10 @@ Fields (these names are part of the contract asserted by
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `issues_attempted` | `int` | Number of issues the orchestrator entered. |
+| `issues_attempted` | `int` | Number of issues the orchestrator entered. Always `0` on a dry run: discovery is not an attempt. |
 | `issues_succeeded` | `int` | Number of issues created successfully. |
 | `issues_failed` | `int` | Number of issues whose create failed. |
+| `issues_discovered` | `int` | Number of source issues found by the dry-run read-only listing. `0` on normal runs (discovery is only recorded during dry-run short-circuit). |
 | `comments_attempted` | `int` | Total comments across all attempted issues. |
 | `comments_succeeded` | `int` | Total comments posted successfully. |
 | `comments_failed` | `int` | Total comments that failed. |
@@ -266,9 +279,10 @@ The policy, in order of precedence:
    fetch, the orchestrator logs a one-line warning and falls back to
    `"Migrated from Codeberg"`. No `update_repository_description` call is
    issued.
-4. **Do not PATCH on `--dry-run`.** Under `--dry-run`, no HTTP request and no
-   state write is performed for the description; the dry-run short-circuit
-   applies.
+4. **Do not PATCH on `--dry-run`.** Under `--dry-run`, no mutating
+   request and no state write is performed for the description;
+   read-only `GET` requests (including the source description fetch)
+   are permitted; the dry-run short-circuit applies.
 
 If the target repo already exists, neither fetching the source description nor
 calling `update_repository_description` is performed, regardless of whether
@@ -412,11 +426,18 @@ implementing agent adds them after RED review):
 - `test_result_aggregates_counts_for_reporter` — verifies the four
   counter fields and `git["clone"]` / `git["push"]` map to the
   reporter's expectations.
-- `test_dry_run_makes_no_http_or_subprocess_calls` — verifies that
-  the fake transport and fake command runner are not called during
-  a dry-run.
+- `test_dry_run_issues_only_get_requests` — verifies that only
+  read-only `GET` requests are registered with the fake transport
+  during a dry-run; no mutating request is issued.
+- `test_dry_run_makes_no_subprocess_calls` — verifies that the fake
+  command runner is not called during a dry-run.
 - `test_dry_run_does_not_write_state` — verifies that
-  `StateStore.save` is not called during a dry-run.
+  `StateStore.save` is not called during a dry-run and that a
+  pre-populated `state.json` remains byte-for-byte unchanged.
+- `test_dry_run_reports_discovered_issue_count` — verifies that the
+  dry-run result carries `issues_attempted == 0` plus
+  `issues_discovered == 2`, and that the dry-run summary reports
+  "would process 2 issues" rather than reporting zero.
 
 ## 8. Implementation order
 

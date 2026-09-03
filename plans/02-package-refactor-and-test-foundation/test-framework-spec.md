@@ -336,15 +336,26 @@ The CLI is the public entry point. Tests cover:
 
 ### 7.4 Dry-run semantics
 
-- Dry-run issues no HTTP requests against Codeberg or GitHub. Tests
-  assert that no request is registered with the mock transport.
+- Dry run is read-only, not offline. Read-only `GET` requests against
+  Codeberg and GitHub are permitted for discovery (target repository
+  status, source metadata/description, source issues). Tests assert
+  that no mutating request (`POST`/`PATCH`/`PUT`/`DELETE`) is
+  registered with the mock transport.
+- Dry-run invokes no git subprocess. Token reads (the environment or
+  `gh auth token`) are still permitted because they are local,
+  non-network reads.
 - Dry-run still loads state but never writes the checkpoint file.
-  Tests assert that the destination file is unchanged after a dry-run
-  that exits normally.
+  Tests assert that a pre-populated destination file is byte-for-byte
+  unchanged after a dry-run that exits normally, and that
+  `StateStore.save` is not called during the run.
 - Dry-run still validates source and target arguments.
 - Dry-run always exits 0 regardless of underlying state. The reporter
-  emits a dry-run summary that does not claim "migrated" or
-  "complete" and does not enumerate failures.
+  emits a dry-run summary that reflects the discovered data (e.g.,
+  "would process N issues", driven by `result.issues_discovered`)
+  rather than reporting zero, does not claim "migrated" or
+  "complete", and does not enumerate failures. Discovery does not
+  count as work: `issues_attempted` stays `0` on a dry run, and the
+  discovered count is carried separately in `issues_discovered`.
 
 ## 8. Repository-description tests
 
