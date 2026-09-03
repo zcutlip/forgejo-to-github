@@ -141,6 +141,14 @@ class MigrationOrchestrator:
         self.state: Any = state
         self.reporter: Any = reporter
 
+        # Concrete StateStore integration (narrow seam): orchestrator-owned
+        # in-memory migrated map and cached repo_created/git_pushed, populated
+        # lazily at run start via StateStore.load() when that API is present.
+        self._concrete_state_loaded: bool = False
+        self._concrete_migrated: dict[int, int] = {}
+        self._concrete_repo_created: bool = False
+        self._concrete_git_pushed: bool = False
+
     # --- public entry point --------------------------------------------------
 
     def run(self) -> MigrationResult:
@@ -160,6 +168,12 @@ class MigrationOrchestrator:
             return result
 
         result = MigrationResult()
+
+        # Concrete StateStore resume: load existing checkpoint at run start
+        # when the injected state seam exposes the concrete load()/save()
+        # API. This populates the orchestrator-owned migrated map used for
+        # resume checks, without broadening the legacy already_migrated path.
+        self._ensure_concrete_state_loaded()
 
         # Phase 4: Git mirror. Skipped entirely when --skip-git is set.
         if not bool(getattr(self.repo, "skip_git", False)):
@@ -417,6 +431,42 @@ class MigrationOrchestrator:
         result.issues_succeeded += 1
         self._safe_issue_succeeded(source_number, github_number)
 
+    # --- concrete StateStore helpers (narrow seam) ---------------------------
+
+    def _is_concrete_state_store(self) -> bool:
+        """Whether the injected state seam is the concrete StateStore."""
+        load_fn = getattr(self.state, "load", None)
+        save_fn = getattr(self.state, "save", None)
+        return callable(load_fn) and callable(save_fn)
+
+    def _ensure_concrete_state_loaded(self) -> None:
+        """Load existing StateStore checkpoint at run start when available.
+
+        Populates the orchestrator-owned in-memory migrated map and cached
+        repo_created/git_pushed fields. This is the resume source for the
+        concrete path; legacy fakes continue to use already_migrated.
+        Idempotent within a single orchestrator instance.
+        """
+        if self._concrete_state_loaded:
+            return
+        if not self._is_concrete_state_store():
+            self._concrete_state_loaded = True
+            return
+        load_fn = getattr(self.state, "load")
+        # load() -> dict with keys source/target/repo_created/git_pushed/migrated
+        data = load_fn()  # let StateLoadError propagate; fresh file returns defaults
+        if not isinstance(data, dict):
+            self._concrete_state_loaded = True
+            return
+        raw_migrated = data.get("migrated", {})
+        if isinstance(raw_migrated, dict):
+            self._concrete_migrated = dict(raw_migrated)
+        else:
+            self._concrete_migrated = {}
+        self._concrete_repo_created = bool(data.get("repo_created", False))
+        self._concrete_git_pushed = bool(data.get("git_pushed", False))
+        self._concrete_state_loaded = True
+
     # --- collaborator wrappers (duck-typed) ----------------------------------
 
     def _list_issues(self) -> list[dict[str, Any]]:
@@ -426,6 +476,13 @@ class MigrationOrchestrator:
 
     def _already_migrated(self, source_number: int) -> bool:
         """Whether ``source_number`` is already checkpointed in the state seam."""
+        # Concrete StateStore path: use orchestrator-owned migrated map
+        # populated at run start via StateStore.load(). Narrow seam: only
+        # when load/save are present do we consult the concrete map;
+        # legacy fakes keep using already_migrated.
+        if self._is_concrete_state_store():
+            self._ensure_concrete_state_loaded()
+            return source_number in self._concrete_migrated
         already = getattr(self.state, "already_migrated", None)
         if not callable(already):
             return False
@@ -436,6 +493,24 @@ class MigrationOrchestrator:
 
     def _safe_record_issue(self, source_number: int, github_number: int) -> None:
         """Forward ``record_issue`` to the state seam, swallowing errors."""
+        # Concrete StateStore path: record in orchestrator-owned in-memory
+        # state and persist via StateStore.save(repo_created, git_pushed,
+        # migrated), preserving repo_created/git_pushed as currently known.
+        if self._is_concrete_state_store():
+            self._ensure_concrete_state_loaded()
+            self._concrete_migrated[source_number] = github_number
+            save_fn = getattr(self.state, "save", None)
+            if not callable(save_fn):
+                return
+            try:
+                save_fn(
+                    self._concrete_repo_created,
+                    self._concrete_git_pushed,
+                    dict(self._concrete_migrated),
+                )
+            except Exception:  # noqa: BLE001 — state seam is best-effort
+                return
+            return
         record = getattr(self.state, "record_issue", None)
         if not callable(record):
             return
