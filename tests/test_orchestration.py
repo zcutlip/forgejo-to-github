@@ -16,7 +16,8 @@
 # The orchestrator's ``run`` entry point returns a result object that is
 # inspectable by these tests. Result fields used in assertions are part
 # of the public contract (e.g., ``clone_status``, ``push_status``,
-# ``issues_attempted``, ``issues_succeeded``, ``issues_failed``).
+# ``issues_attempted``, ``issues_succeeded``, ``issues_failed``,
+# ``issues_discovered``).
 #
 # RED-stage expectation: these tests fail via ``ImportError`` for the
 # missing ``MigrationOrchestrator`` symbol or attribute on a result
@@ -34,11 +35,19 @@ GitHubClient interfaces without weakening behavioral assertions.
 
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from forgejo_to_github.codeberg import CodebergClient
+from forgejo_to_github.domain import Repository
+from forgejo_to_github.git import GitMirror
+from forgejo_to_github.github import GitHubClient
 from forgejo_to_github.migration import MigrationOrchestrator
+from forgejo_to_github.reporting import Reporter
+from forgejo_to_github.state import StateStore
 
 # --- helpers ---------------------------------------------------------------
 
@@ -435,3 +444,324 @@ def test_later_issue_continues_after_one_issue_creation_failure():
     assert hasattr(result, "issues_failed"), "result must expose issues_failed; missing"
     assert result.issues_attempted == 3
     assert result.issues_failed == 1
+
+
+# ===========================================================================
+# RED class: B. Boundary unit — dry-run boundary contract (append-only)
+# ===========================================================================
+#
+# Contract (user-approved): dry run is read-only, NOT offline. A dry run
+# must still perform GET-only discovery (target repository check, source
+# issue listing) so the summary reports what *would* be migrated, while
+# never spawning subprocesses and never persisting checkpoints.
+#
+# The current implementation short-circuits ``run()`` with zero requests
+# when ``repo.dry_run`` is set (see ``migration.py`` Phase 1), so these
+# tests are RED against that behavior. One primary failure reason per
+# test; fully offline and deterministic — the transport and subprocess
+# boundaries below are recording fakes and perform no real I/O.
+#
+# B.4 is intentionally GREEN at this stage only in its subprocess
+# guard half (see that test's docstring); the state-write and
+# report-count contracts are RED. The B.2 subprocess guard stays green
+# in RED because the short-circuiting dry run allows no subprocess at
+# all — that is a regression guard, not an implemented feature.
+
+
+class _FakeResponse:
+    """Minimal response-like object matching the Transport protocol."""
+
+    def __init__(
+        self,
+        status_code: int,
+        payload: Any,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.status_code: int = status_code
+        self.headers: dict[str, str] = headers if headers is not None else {}
+        self._payload: Any = payload
+
+    def json(self) -> Any:
+        return self._payload
+
+
+class _ScriptedDiscoveryTransport:
+    """Recording Transport scripted for dry-run GET discovery.
+
+    Routes the two GET endpoints the dry-run discovery phase is expected
+    to consult: the GitHub target repository check and the Codeberg
+    issues list (paginated: page 1 returns the scripted issues, page 2
+    returns an empty page). Every request is recorded so tests can
+    assert the method boundary. Non-GET requests are recorded and
+    answered with a benign 201 so a broken dry run fails the method
+    assertion rather than with an unrelated client error.
+    """
+
+    def __init__(self, issues: list[dict[str, Any]]) -> None:
+        self.issues: list[dict[str, Any]] = list(issues)
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        json_body: Any | None = None,
+        timeout: float | None = None,
+    ) -> _FakeResponse:
+        self.calls.append((method, url))
+        if method != "GET":
+            # Write paths must never be reached during a dry run; keep
+            # the response plausible so the method assertion stays the
+            # single failure reason.
+            return _FakeResponse(201, {"number": 101, "id": 1001})
+        if url.endswith("/repos/owner/target"):
+            # GitHub target repository existence check.
+            return _FakeResponse(200, {"name": "target"})
+        if "/repos/owner/source/issues" in url and "/comments" not in url:
+            page = int((params or {}).get("page", 1))
+            return _FakeResponse(200, list(self.issues) if page == 1 else [])
+        # Anything else (e.g. repo description GET) is inert.
+        return _FakeResponse(200, {})
+
+
+class _RecordingSink:
+    """Recording output sink satisfying the Reporter Sink protocol."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def write(self, line: str) -> None:
+        self.lines.append(line)
+
+
+def _build_dry_run(
+    *,
+    codeberg: Any,
+    github: Any,
+    git: Any,
+    state: Any,
+    reporter: Any,
+) -> MigrationOrchestrator:
+    """Construct an orchestrator over a dry-run ``Repository`` value."""
+    return MigrationOrchestrator(
+        repo=Repository(source="owner/source", target="owner/target", dry_run=True),
+        codeberg=codeberg,
+        github=github,
+        git=git,
+        state=state,
+        reporter=reporter,
+    )
+
+
+# --- B.1 dry run issues GET-only discovery requests -------------------------
+
+
+def test_dry_run_issues_only_get_requests() -> None:
+    """Dry run performs read-only discovery: every HTTP request is a GET.
+
+    The orchestrator must consult the discovery endpoints (GitHub target
+    repository check, Codeberg issues list) via the real clients backed
+    by a recording transport, and must never issue a POST/PATCH/PUT.
+    """
+    transport = _ScriptedDiscoveryTransport(issues=[_issue(1), _issue(2)])
+    codeberg = CodebergClient(
+        "https://codeberg.org", "owner", "source", None, transport=transport
+    )
+    github = GitHubClient(
+        "https://api.github.com", "owner", "target", None, transport=transport
+    )
+    orch = _build_dry_run(
+        codeberg=codeberg,
+        github=github,
+        git=_FakeGit(),
+        state=_FakeState(),
+        reporter=_FakeReport(),
+    )
+
+    orch.run()
+
+    # Primary failure reason: the short-circuiting dry run makes zero
+    # requests, so read-only discovery is not happening at all.
+    get_calls = [call for call in transport.calls if call[0] == "GET"]
+    assert get_calls, (
+        "dry run must issue at least one GET discovery request; "
+        f"recorded calls: {transport.calls!r}"
+    )
+    non_get = [call for call in transport.calls if call[0] != "GET"]
+    assert non_get == [], (
+        f"dry run is read-only; only GET requests are allowed; got {non_get!r}"
+    )
+
+
+# --- B.2 dry run never reaches the subprocess boundary ----------------------
+
+
+def test_dry_run_makes_no_subprocess_calls() -> None:
+    """Dry run must not clone or push: zero git subprocess invocations.
+
+    This guard is intentionally green during RED: the current
+    short-circuiting dry run allows no subprocess at all, so the
+    assertion holds trivially. It is kept as a regression guard —
+    once read-only discovery is implemented, it must keep holding
+    (discovery issues GET requests only, never a git subprocess).
+    """
+    commands: list[list[str]] = []
+
+    def recording_runner(argv: list[str], **kwargs: Any) -> Any:
+        commands.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def fake_tempdir(prefix: str | None = None, **kwargs: Any) -> str:
+        # Recording-only: never creates a real directory.
+        return "/nonexistent-fake-tempdir"
+
+    git_mirror = GitMirror(
+        source_url="https://codeberg.org/owner/source.git",
+        target_url="https://github.com/owner/target.git",
+        github_token="not-a-real-token",
+        command_runner=recording_runner,
+        tempdir_factory=fake_tempdir,
+        cleanup=lambda path: None,
+    )
+    transport = _ScriptedDiscoveryTransport(issues=[_issue(1)])
+    orch = _build_dry_run(
+        codeberg=CodebergClient(
+            "https://codeberg.org", "owner", "source", None, transport=transport
+        ),
+        github=GitHubClient(
+            "https://api.github.com", "owner", "target", None, transport=transport
+        ),
+        git=git_mirror,
+        state=_FakeState(),
+        reporter=_FakeReport(),
+    )
+
+    orch.run()
+
+    assert commands == [], f"dry run must not spawn subprocesses; got {commands!r}"
+
+
+# --- B.3 dry run never persists the checkpoint ------------------------------
+
+
+class _SaveSpyStateStore(StateStore):
+    """Narrow spy over ``StateStore`` that records ``save`` calls.
+
+    Overrides only ``save``; loading and all other behavior remain the
+    real implementation's. No implementation-side compatibility hooks
+    are assumed — this is a plain subclass, appropriate to the current
+    ``StateStore.save`` signature.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.save_calls: list[tuple[bool, bool, int]] = []
+
+    def save(
+        self,
+        repo_created: bool,
+        git_pushed: bool,
+        migrated: dict[int, int],
+    ) -> None:
+        self.save_calls.append((bool(repo_created), bool(git_pushed), len(migrated)))
+        # Spy only: record and delegate nothing — a dry run must never
+        # reach the real write path. Recording instead of delegating
+        # also guarantees the on-disk file cannot change via this seam.
+        return
+
+
+def test_dry_run_does_not_write_state(tmp_path: Path) -> None:
+    """Dry run must not create or update the on-disk state checkpoint.
+
+    Two assertions back the same invariant:
+
+    - a valid pre-populated ``state.json`` remains byte-for-byte
+      unchanged across the dry run; and
+    - no ``StateStore.save`` call occurs during the run (observed via
+      the ``_SaveSpyStateStore`` subclass).
+    """
+    state_path = tmp_path / "state.json"
+    # Prepopulate a valid checkpoint via the real StateStore.write path
+    # so the test exercises the "existing file stays untouched" path,
+    # not just "no file created".
+    seed_store = StateStore(state_path, "owner/source", "owner/target")
+    seed_store.save(repo_created=True, git_pushed=True, migrated={7: 107, 9: 109})
+    before: bytes = state_path.read_bytes()
+    # The run itself observes the spy subclass: real load behavior, but
+    # ``save`` is recorded and never reaches the write path.
+    store = _SaveSpyStateStore(state_path, "owner/source", "owner/target")
+    orch = _build_dry_run(
+        codeberg=_FakeApi(issues=[]),
+        github=_FakeApi(issues=[]),
+        git=_FakeGit(),
+        state=store,
+        reporter=_FakeReport(),
+    )
+
+    orch.run()
+
+    assert state_path.read_bytes() == before, (
+        "dry run must leave an existing state checkpoint byte-for-byte "
+        f"unchanged; before={before!r}, after={state_path.read_bytes()!r}"
+    )
+    assert store.save_calls == [], (
+        "StateStore.save must not be called during a dry run; "
+        f"recorded calls: {store.save_calls!r}"
+    )
+
+
+# --- B.4 dry-run summary reports the discovered issue count -----------------
+
+
+def test_dry_run_reports_discovered_issue_count() -> None:
+    """The dry-run summary must name the discovered count, not zero.
+
+    The orchestrator discovers two source issues during dry-run GET
+    discovery. The result contract keeps ``issues_attempted == 0``
+    (discovery is not an attempt) and carries the found count in
+    ``issues_discovered``. The reporter's dry-run template must
+    surface that count as "would process N issues". The CLI owns the
+    final summary emission, so this test drives ``render_final``
+    exactly as the CLI does after ``run()``.
+    """
+    transport = _ScriptedDiscoveryTransport(issues=[_issue(1), _issue(2, comments=1)])
+    codeberg = CodebergClient(
+        "https://codeberg.org", "owner", "source", None, transport=transport
+    )
+    github = GitHubClient(
+        "https://api.github.com", "owner", "target", None, transport=transport
+    )
+    sink = _RecordingSink()
+    reporter = Reporter(output=sink, error_output=sink)
+    orch = _build_dry_run(
+        codeberg=codeberg,
+        github=github,
+        git=_FakeGit(),
+        state=_FakeState(),
+        reporter=reporter,
+    )
+
+    result = orch.run()
+    reporter.render_final(result)
+
+    # Discovery is not an attempt: a dry run never enters an issue.
+    assert result.issues_attempted == 0, (
+        "dry-run result must keep issues_attempted == 0; "
+        f"got {result.issues_attempted!r}"
+    )
+    # The discovered count is carried separately from the attempt
+    # counters and is the value the summary renders.
+    assert result.issues_discovered == 2, (
+        "dry-run result must carry the discovered source issue count "
+        f"(2) in issues_discovered; got {getattr(result, 'issues_discovered', '<missing>')!r}"
+    )
+
+    joined = "\n".join(sink.lines)
+    assert "would process 2 issues" in joined, (
+        "dry-run summary must report the discovered issue count "
+        '("would process 2 issues"), not zero; got:\n'
+        f"{joined}"
+    )
