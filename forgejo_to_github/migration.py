@@ -340,18 +340,16 @@ class MigrationOrchestrator:
         # S1: report progress.
         self._safe_issue_started(source_number)
 
-        # S2: create the issue.
+        # S2: create the issue via concrete GitHubClient API.
         try:
-            create_payload: dict[str, Any] = {
-                "number": source_number,
-                "title": str(issue.get("title", "")),
-                "body": str(issue.get("body", "")),
-            }
-            labels = issue.get("labels")
-            if labels:
-                create_payload["labels"] = list(labels)
-            create_response = self.github.create_issue(create_payload)
-            github_number = int(create_response["number"])
+            title = str(issue.get("title", ""))
+            body = str(issue.get("body", ""))
+            labels_raw = issue.get("labels")
+            if labels_raw:
+                labels_arg: list[str] = [str(lbl) for lbl in list(labels_raw)]
+            else:
+                labels_arg = []
+            github_number = int(self.github.create_issue(title, body, labels_arg))
         except Exception as exc:  # noqa: BLE001 — issue create failure
             result.issues_failed += 1
             message = str(exc) or exc.__class__.__name__
@@ -378,20 +376,8 @@ class MigrationOrchestrator:
                 continue
             result.comments_attempted += 1
             try:
-                comment_payload: dict[str, Any] = {
-                    "index": comment_index,
-                    "body": str(comment.get("body", "")),
-                }
-                # The fake seam in tests/test_orchestration.py expects
-                # the source issue number as the positional
-                # ``issue_number`` argument and reads its ``index`` from
-                # the payload. Production ``GitHubClient.create_comment``
-                # accepts the github issue number; both signatures are
-                # accepted because the fake is a positional-arg stub.
-                response = self.github.create_comment(
-                    source_number,
-                    comment_payload,
-                )
+                comment_body = str(comment.get("body", ""))
+                response = self.github.create_comment(github_number, comment_body)
             except Exception as exc:  # noqa: BLE001 — comment failure
                 result.comments_failed += 1
                 message = str(exc) or exc.__class__.__name__
