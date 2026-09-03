@@ -61,6 +61,7 @@ locked public contract.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 from forgejo_to_github.domain import IssueFailure, MigrationResult, Repository
@@ -272,10 +273,8 @@ class MigrationOrchestrator:
                 # cleanup runs even after push failures, after successful clone
                 cleanup_fn = getattr(self.git, "cleanup", None)
                 if callable(cleanup_fn):
-                    try:
+                    with contextlib.suppress(Exception):
                         cleanup_fn(local_path)
-                    except Exception:  # noqa: BLE001 — best-effort cleanup
-                        pass
             return
 
         # Legacy fallback for tests/test_orchestration.py _FakeGit
@@ -452,9 +451,10 @@ class MigrationOrchestrator:
         if not self._is_concrete_state_store():
             self._concrete_state_loaded = True
             return
-        load_fn = getattr(self.state, "load")
         # load() -> dict with keys source/target/repo_created/git_pushed/migrated
-        data = load_fn()  # let StateLoadError propagate; fresh file returns defaults
+        data = (
+            self.state.load()
+        )  # let StateLoadError propagate; fresh file returns defaults
         if not isinstance(data, dict):
             self._concrete_state_loaded = True
             return
