@@ -125,7 +125,12 @@ run; the orchestrator's dry-run short-circuit performs the read-only
 discovery (read-only `GET` requests only; no mutating request, no git
 subprocess, no state write) and records the found issue count in
 `MigrationResult.issues_discovered` while keeping
-`issues_attempted == 0`. The CLI's dry-run behavior is to:
+`issues_attempted == 0`. The short-circuit also records a
+`DryRunDiscovery` value in `MigrationResult.discovery`
+(target repo, target-repo existence, discovered comment count, state
+path, checkpoint count); that field is `None` on normal runs and
+normal-run result behavior is unchanged. The CLI's dry-run behavior
+is to:
 
 1. Validate `args` (already done by `parse_args`).
 2. Resolve the state path and read the Codeberg/GitHub tokens.
@@ -138,7 +143,12 @@ subprocess, no state write) and records the found issue count in
 The CLI itself issues no HTTP request and invokes no git subprocess
 during a dry-run; the read-only discovery is performed by the
 orchestrator through the injected clients. The token reads remain
-because they are local environment reads.
+because they are local environment reads. The dry-run final summary
+is the approved informative preview rendered by `render_final`
+(target repo, repo would-be-created/existing status, would-process
+issue count, would-post comment count, skipped Git phases, and the
+state path with its checkpoint count); the locked wording is stage 05
+§3.4 rule 6 and `test-framework-spec.md` §7.4.
 
 ### 3.4 `f2gh._build_orchestrator(args: argparse.Namespace) -> MigrationOrchestrator`
 

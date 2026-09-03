@@ -194,7 +194,9 @@ the conflict rather than improvising.
 
   - Read-only `GET` requests to Codeberg and GitHub are permitted for
     discovery: target repository status, source repository
-    metadata/description, and source issues. No mutating request
+    metadata/description, and source issues (plus, for each
+    discovered source issue, its comments, so the discovered comment
+    count can be computed). No mutating request
     (`POST`/`PATCH`/`PUT`/`DELETE`) may be issued. Tests assert no
     mutating request is registered with the mock transport.
   - No git subprocess (`git clone`, `git push`) is invoked. The Git
@@ -212,9 +214,15 @@ the conflict rather than improvising.
     records `issues_discovered` — the number of source issues found
     by the read-only listing — and the result and the final report
     must reflect that discovered count (e.g., "would process N
-    issues") rather than reporting zero. Normal-run counter semantics
-    are unchanged: `issues_discovered` is only populated on a dry
-    run. The reporter's final summary is the dry-run
+    issues") rather than reporting zero. The result also carries a
+    populated `DryRunDiscovery` value (defined in stage 04 §3.7.1)
+    recording the target repository, whether the target repository
+    already exists, the total comment count discovered across the
+    source issues, the state file path, and the number of issues
+    checkpointed in the loaded state. Normal-run result behavior is
+    unchanged: `issues_discovered` is only populated on a dry run and
+    `discovery` is `None` outside dry-run. The reporter's
+    final summary is the dry-run
     summary (no `Migrated` claims). Exit code is `EXIT_SUCCESS` (0)
     regardless of underlying state.
 

@@ -25,6 +25,7 @@ translating the result into an exit code.
 - **New module:** `forgejo_to_github/migration.py` containing:
   - `MigrationOrchestrator` class.
   - `MigrationResult` dataclass.
+  - `DryRunDiscovery` frozen dataclass.
   - `Repository` frozen dataclass.
   - `IssueFailure` dataclass.
   - Optional small helpers (e.g., a label-default-color constant).
@@ -89,9 +90,11 @@ Top-level orchestration entry point. Performs these phases in order:
 1. **Dry-run short-circuit.** If `self.repo.dry_run` is `True`, skip
    all phases 2–5 and instead perform read-only discovery by issuing
    read-only `GET` requests for the target repository status, the
-   source repository metadata/description, and the source issues. No
-   mutating request (`POST`/`PATCH`/`PUT`/`DELETE`), no git
-   subprocess, and no state write is performed. Produce a
+   source repository metadata/description, and the source issues
+   (plus, for each discovered source issue, its comments, so the
+   discovered comment count can be computed). No mutating request
+   (`POST`/`PATCH`/`PUT`/`DELETE`), no git subprocess, and no state
+   write is performed. Produce a
    `MigrationResult` whose `git["clone"]` and `git["push"]` are both
    `"skipped"`, whose failure lists are empty, and whose migration
    counters are zero (`issues_attempted == 0`: a dry run never enters
@@ -99,8 +102,14 @@ Top-level orchestration entry point. Performs these phases in order:
    counters: the result sets `issues_discovered` to the number of
    source issues found by the read-only listing, so the result and
    the final report reflect the discovered data rather than reporting
-   zero. Normal-run counter semantics are unchanged:
-   `issues_discovered` stays `0` outside dry-run.
+   zero. The result also carries a populated `DryRunDiscovery` value
+   in `discovery` (see §3.7.1): the target repository, whether
+   the target repository already exists, the total comment count
+   discovered across the source issues, the state file path, and the
+   number of issues checkpointed in the loaded state. Normal-run
+   counter semantics are unchanged:
+   `issues_discovered` stays `0` outside dry-run and
+   `discovery` stays `None`.
    The reporter is **not** called during a dry-run. The CLI is
    responsible for emitting the dry-run final summary (see stage 06
    for the dry-run wording rules).
@@ -259,6 +268,43 @@ Fields (these names are part of the contract asserted by
 | `clone_status` | `str` | Convenience alias for `git["clone"]`; some tests reach for it. |
 | `push_status` | `str` | Convenience alias for `git["push"]`; some tests reach for it. |
 | `dry_run` | `bool` | True when `repo.dry_run` was set; included for reporter clarity. |
+| `discovery` | `DryRunDiscovery \| None` | Populated only on a dry run; `None` on normal runs. See §3.7.1. |
+
+### 3.7.1 `DryRunDiscovery`
+
+Frozen `@dataclass` populated only by the dry-run short-circuit
+(§3.2 step 1) and attached to `MigrationResult.discovery`. It
+is `None` on normal runs; normal-run result behavior is unchanged.
+
+```python
+@dataclass(frozen=True)
+class DryRunDiscovery:
+    target: str            # "owner/target" as supplied by the CLI
+    repo_exists: bool      # True when the target repository already exists on GitHub
+    comments_discovered: int  # total comments across the discovered source issues
+    state_path: str        # the state file path held by the StateStore
+    state_migrated: int    # number of issues checkpointed in the loaded state
+```
+
+Discovery semantics:
+
+- `target` is the target repository string from `Repository.target`.
+- `repo_exists` reflects the read-only `GET` against the target
+  repository: `True` when it exists, `False` when the GET reports
+  not found. No repository is created.
+- `comments_discovered` is the sum of per-issue comment counts from
+  the read-only `GET` listings of each discovered source issue's
+  comments. No comment is posted.
+- `state_path` is the path the injected `StateStore` was constructed
+  with (its `state_path` attribute, per `01-state-store.md` §3.2).
+  The store is used read-only: state is loaded, never written.
+- `state_migrated` is the number of entries in the loaded state's
+  `migrated` mapping (`len(state.migrated)`).
+
+The reporter consumes this value to render the approved dry-run
+preview summary (stage 05 §3.4 rule 6). `MigrationResult` may carry
+the value even though it is a non-frozen dataclass; the discovery
+value itself is immutable once produced.
 
 ### 3.8 Repository description policy
 
@@ -436,7 +482,8 @@ implementing agent adds them after RED review):
   pre-populated `state.json` remains byte-for-byte unchanged.
 - `test_dry_run_reports_discovered_issue_count` — verifies that the
   dry-run result carries `issues_attempted == 0` plus
-  `issues_discovered == 2`, and that the dry-run summary reports
+  `issues_discovered == 2`, a populated `DryRunDiscovery` value
+  (per §3.7.1), and that the dry-run summary reports
   "would process 2 issues" rather than reporting zero.
 
 ## 8. Implementation order

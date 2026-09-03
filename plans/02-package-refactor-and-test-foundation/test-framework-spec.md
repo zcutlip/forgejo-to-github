@@ -331,14 +331,16 @@ The CLI is the public entry point. Tests cover:
   asserted; no magic numbers.
 - A migration that failed before producing any issues exits with the
   documented "failure" code, distinct from the incomplete code.
-- `--dry-run` exits 0 regardless of underlying errors, but logs every
-  error that would have occurred.
+- `--dry-run` exits 0 regardless of underlying state; it performs
+  read-only, `GET`-only discovery and emits the dry-run preview
+  summary (§7.4).
 
 ### 7.4 Dry-run semantics
 
 - Dry run is read-only, not offline. Read-only `GET` requests against
   Codeberg and GitHub are permitted for discovery (target repository
-  status, source metadata/description, source issues). Tests assert
+  status, source metadata/description, source issues, and each
+  discovered source issue's comments). Tests assert
   that no mutating request (`POST`/`PATCH`/`PUT`/`DELETE`) is
   registered with the mock transport.
 - Dry-run invokes no git subprocess. Token reads (the environment or
@@ -349,13 +351,33 @@ The CLI is the public entry point. Tests cover:
   unchanged after a dry-run that exits normally, and that
   `StateStore.save` is not called during the run.
 - Dry-run still validates source and target arguments.
+- The dry-run result carries a populated `DryRunDiscovery` value with
+  the target repository, target-repo existence, discovered comment
+  count, state path, and checkpoint count. `discovery` is
+  `None` on normal runs; normal-run result behavior is unchanged.
 - Dry-run always exits 0 regardless of underlying state. The reporter
-  emits a dry-run summary that reflects the discovered data (e.g.,
-  "would process N issues", driven by `result.issues_discovered`)
-  rather than reporting zero, does not claim "migrated" or
-  "complete", and does not enumerate failures. Discovery does not
-  count as work: `issues_attempted` stays `0` on a dry run, and the
-  discovered count is carried separately in `issues_discovered`.
+  emits the approved informative dry-run preview, rendered from the
+  `DryRunDiscovery` value and `result.issues_discovered`. The preview
+  consists of these lines:
+
+  ```
+  Dry-run complete — no changes were made.
+  Target repo: owner/target
+  Repo: would be created        (or `Repo: existing` when the target already exists)
+  Issues: would process N issues
+  Comments: would post M
+  Git: clone skipped, push skipped (dry-run)
+  State: path (K checkpointed)
+  ```
+
+  where `N` is the discovered issue count, `M` is
+  `discovery.comments_discovered`, and the `State:` line
+  shows `discovery.state_path` and
+  `discovery.state_migrated`. The preview does not count
+  discovery as work: `issues_attempted` stays `0` on a dry run, the
+  discovered count is carried separately in `issues_discovered`, and
+  the summary does not claim "migrated" or "complete" as migration
+  outcomes and does not enumerate failures.
 
 ## 8. Repository-description tests
 

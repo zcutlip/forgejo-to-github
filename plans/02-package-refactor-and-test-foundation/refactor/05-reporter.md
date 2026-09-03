@@ -160,12 +160,33 @@ The final summary must obey:
 5. When `result.git["clone"] == "failed"`, the summary must include
    `"clone"` and `"fail"` substrings (per
    `test_clone_failure_summary_marks_clone_status_distinctly`).
-6. When `result.dry_run is True`, the summary uses a dry-run
-   template that does not say "migrated" or "complete" and does not
-   enumerate failures. The summary text contains the substring
-   `"dry-run"` (per `test_dry_run_summary_does_not_claim_migrated`,
-   to be added in stage 06) and reports the discovered count via the
-   `"would process N issues"` wording driven by
+6. When `result.dry_run is True`, the summary is the approved
+   informative dry-run preview. It is rendered from
+   `result.discovery` (the `DryRunDiscovery` value from
+   stage 04 §3.7.1) and `result.issues_discovered`, and consists of
+   these lines:
+
+   ```
+   Dry-run complete — no changes were made.
+   Target repo: owner/target
+   Repo: would be created
+   Issues: would process N issues
+   Comments: would post M
+   Git: clone skipped, push skipped (dry-run)
+   State: path (K checkpointed)
+   ```
+
+   The `Repo:` line reads `would be created` when
+   `discovery.repo_exists` is `False` and `existing` when
+   it is `True`. `N` is `result.issues_discovered`; `M` is
+   `discovery.comments_discovered`; the `State:` path and `K`
+   are `discovery.state_path` and
+   `discovery.state_migrated`. The preview does not claim
+   any issue was migrated and does not enumerate failures (per
+   `test_dry_run_summary_does_not_claim_migrated`, to be added in
+   stage 06), and it is written to the normal-output
+   sink (a dry run produces no failures). The discovered issue count
+   is reported via the `"would process N issues"` wording driven by
    `result.issues_discovered` (per
    `tests/test_orchestration.py::test_dry_run_reports_discovered_issue_count`).
    The template must not consume `issues_attempted` for this: on a
@@ -258,8 +279,9 @@ Added in stage 05:
 Added in stage 06:
 
 - `tests/test_reporting.py::test_dry_run_summary_does_not_claim_migrated` —
-  asserts the dry-run summary uses the dry-run template and does not
-  contain "migrated" or "complete" as success claims. The template
+  asserts the dry-run summary is the approved preview (stage 05
+  §3.4 rule 6) rendered from `result.discovery` and does not
+  contain "migrated" or "complete" as success claims. The preview
   renders the discovered count from `result.issues_discovered` using
   the "would process N issues" wording; `issues_attempted` is always
   `0` on a dry run and is never rendered as the dry-run count.
