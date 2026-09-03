@@ -836,15 +836,12 @@ class _ScriptedPreviewTransport:
 # --- D.1 dry-run summary previews the target-repository outcome -------------
 
 
-def test_dry_run_summary_reports_target_and_repo_status() -> None:
-    """The dry-run summary must preview the target-repository outcome.
+def test_dry_run_summary_reports_missing_target_would_be_created() -> None:
+    """A missing target (GET 404) previews creation and stays read-only.
 
-    Missing target (GET 404) => the summary names the target repo and
-    says it would be created; existing target (GET 200) => the summary
-    says the repo is existing. Both cases stay read-only: only GET
-    requests are issued and the git seam is never touched.
+    The summary must name the target repo and say it would be created.
+    Only GET requests are issued and the git seam is never touched.
     """
-    # Missing target: the summary must name the target and the creation.
     transport_missing = _ScriptedPreviewTransport(
         issues=[_issue(1)], target_exists=False
     )
@@ -901,7 +898,9 @@ def test_dry_run_summary_reports_target_and_repo_status() -> None:
     assert git_missing.clone_called is False
     assert git_missing.push_called is False
 
-    # Existing target: the summary must say the repo is existing.
+
+def test_dry_run_summary_reports_existing_target_repo_existing() -> None:
+    """An existing target (GET 200) previews the repo as existing."""
     transport_existing = _ScriptedPreviewTransport(
         issues=[_issue(1)], target_exists=True
     )
