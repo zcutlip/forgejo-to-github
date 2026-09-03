@@ -21,7 +21,16 @@
 # RED-stage expectation: these tests fail via ``ImportError`` for the
 # missing ``MigrationOrchestrator`` symbol or attribute on a result
 # object. That is the contract under test.
-"""Orchestration tests for ``forgejo_to_github.migration``."""
+#
+# Approved API-alignment (2026-09-02): _FakeApi signatures updated to
+# match concrete GitHubClient (title, body, labels)->int and
+# (github_number, body)->int with recording plumbing adjusted.
+# Behavioral assertions and contracts unchanged — not test weakening.
+"""Orchestration tests for ``forgejo_to_github.migration``.
+
+Approved API-alignment: fake collaborator signatures aligned to concrete
+GitHubClient interfaces without weakening behavioral assertions.
+"""
 
 from __future__ import annotations
 
@@ -49,6 +58,12 @@ class _FakeApi:
     to verify the order in which the orchestrator reached for the API and
     a way to inject a per-issue failure on demand. It is intentionally
     not a faithful re-implementation of the real Codeberg/GitHub clients.
+
+    Approved API-alignment: ``create_issue``/``create_comment`` now match
+    the concrete ``GitHubClient`` signatures ``(title, body, labels)->int``
+    and ``(github_number, body)->int``. Recording still exposes source
+    numbers for ordering assertions; no compatibility branches for old
+    dict payloads.
     """
 
     def __init__(self, issues: list[dict[str, Any]] | None = None) -> None:
@@ -56,27 +71,36 @@ class _FakeApi:
         self.calls: list[tuple[str, ...]] = []
         self._fail_issue_numbers: set[int] = set()
         self._fail_comment_keys: set[tuple[int, int]] = set()
+        self._github_to_source: dict[int, int] = {}
+        self._comment_counters: dict[int, int] = {}
 
     def list_issues(self) -> list[dict[str, Any]]:
         self.calls.append(("list_issues",))
         return list(self.issues)
 
-    def create_issue(self, payload: dict[str, Any]) -> dict[str, Any]:
-        number = int(payload["number"])
-        self.calls.append(("create_issue", str(number)))
-        if number in self._fail_issue_numbers:
-            raise RuntimeError(f"simulated create_issue failure for {number}")
-        return {"number": 100 + number}
+    def create_issue(self, title: str, body: str, labels: list[str]) -> int:
+        idx = len([c for c in self.calls if c[0] == "create_issue"])
+        source_number = (
+            int(self.issues[idx]["number"]) if idx < len(self.issues) else idx + 1
+        )
+        self.calls.append(("create_issue", str(source_number)))
+        if source_number in self._fail_issue_numbers:
+            raise RuntimeError(f"simulated create_issue failure for {source_number}")
+        github_number = 100 + source_number
+        self._github_to_source[github_number] = source_number
+        return github_number
 
-    def create_comment(
-        self, issue_number: int, payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        comment_index = int(payload["index"])
-        self.calls.append(("create_comment", str(issue_number), str(comment_index)))
-        key = (issue_number, comment_index)
+    def create_comment(self, github_number: int, body: str) -> int:
+        source_number = self._github_to_source.get(
+            int(github_number), int(github_number) - 100
+        )
+        comment_index = self._comment_counters.get(int(github_number), 0)
+        self.calls.append(("create_comment", str(source_number), str(comment_index)))
+        key = (source_number, comment_index)
+        self._comment_counters[int(github_number)] = comment_index + 1
         if key in self._fail_comment_keys:
             raise RuntimeError(f"simulated comment failure for {key}")
-        return {"id": 1000 + comment_index}
+        return 1000 + comment_index
 
     # --- failure injection (test-only) -----------------------------------
 
