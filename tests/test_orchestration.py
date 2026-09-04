@@ -947,6 +947,86 @@ def test_dry_run_summary_reports_existing_target_repo_existing() -> None:
     )
 
 
+# --- D.1.b dry-run discovery tolerates numeric Codeberg comment counts -----
+#
+# Contract (real Codeberg API shape, see issue payload observations):
+# the Codeberg ``/repos/{owner}/{repo}/issues`` listing includes a
+# ``"comments"`` field that is an INTEGER count of comments on the
+# issue — not a list of comment payloads. The dry-run discovery
+# phase must coerce that numeric count into the
+# ``discovery.comments_discovered`` total rather than calling ``len()``
+# on an int (which raises ``TypeError``). Issue migration that follows
+# must still pull comments from the per-issue comments endpoint, so
+# only the discovery counter is at risk; this test stays at the dry-run
+# boundary, never reaches the per-issue migration path, and stays
+# offline.
+
+
+def test_dry_run_handles_numeric_codeberg_comment_count() -> None:
+    """Dry-run discovery must accept numeric ``"comments"`` from Codeberg.
+
+    A Codeberg issue with ``"comments": 3`` (the real API shape) must
+    not crash dry-run discovery. The discovered count must include the
+    integer 3 in ``discovery.comments_discovered`` and the rendered
+    summary must surface it as ``Comments: would post 3``.
+
+    Primary failure reason: the current dry-run discovery does
+    ``len(issue.get("comments") or [])``, which raises ``TypeError`` on
+    an integer. The first assertion isolates that single failure so the
+    GREEN implementation can be evaluated against a single, focused
+    behavior delta.
+    """
+    # Real Codeberg API shape: ``comments`` is an integer count, not a
+    # list. The issue has no embedded comment list — the per-issue
+    # comments endpoint is fetched separately during migration, never
+    # reached during dry-run discovery.
+    numeric_comments_issue: dict[str, Any] = {
+        "number": 1,
+        "title": "issue with numeric comments",
+        "comments": 3,
+    }
+    transport = _ScriptedPreviewTransport(
+        issues=[numeric_comments_issue], target_exists=True
+    )
+    sink = _RecordingSink()
+    reporter = Reporter(output=sink, error_output=sink)
+    orch = _build_dry_run(
+        codeberg=CodebergClient(
+            "https://codeberg.org", "owner", "source", None, transport=transport
+        ),
+        github=GitHubClient(
+            "https://api.github.com", "owner", "target", None, transport=transport
+        ),
+        git=_FakeGit(),
+        state=_FakeState(),
+        reporter=reporter,
+    )
+
+    result = orch.run()
+    reporter.render_final(result)
+
+    # Discovery must not have crashed on ``len(int)`` — the counter is
+    # the primary contract under test.
+    discovery = getattr(result, "discovery", None)
+    assert discovery is not None, (
+        "dry-run result must carry the approved discovery facts "
+        "(result.discovery is absent on MigrationResult); got "
+        f"{discovery!r}"
+    )
+    assert discovery.comments_discovered == 3, (
+        "dry-run discovery must read numeric ``comments`` from a "
+        "Codeberg issue listing as the integer count (3); got "
+        f"{discovery.comments_discovered!r}"
+    )
+
+    joined = "\n".join(sink.lines)
+    assert "Comments: would post 3" in joined, (
+        'dry-run summary must contain "Comments: would post 3" when '
+        "the source listing reports a numeric comment count of 3; "
+        f"got:\n{joined}"
+    )
+
+
 # --- D.2 dry-run summary previews the checkpoint status ---------------------
 
 
