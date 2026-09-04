@@ -71,7 +71,12 @@ from __future__ import annotations
 import contextlib
 from typing import Any
 
-from forgejo_to_github.domain import IssueFailure, MigrationResult, Repository
+from forgejo_to_github.domain import (
+    DryRunDiscovery,
+    IssueFailure,
+    MigrationResult,
+    Repository,
+)
 
 # Default color substituted by the orchestrator when a source label
 # lacks one. The GitHub client does not default colors; this constant
@@ -168,8 +173,8 @@ class MigrationOrchestrator:
         accumulated into the result and the run continues.
         """
         # Phase 1: dry-run read-only discovery. GET requests only — no
-        # mutating HTTP, no git subprocess, no state load or write, and
-        # no reporter calls. The CLI owns the dry-run summary emission.
+        # mutating HTTP, no git subprocess, no state write, and no
+        # reporter calls. The CLI owns the dry-run summary emission.
         if bool(getattr(self.repo, "dry_run", False)):
             return self._discover_dry_run()
 
@@ -208,7 +213,7 @@ class MigrationOrchestrator:
           policy: when the target does not yet exist and no explicit
           ``--description`` was supplied.
         - No mutating HTTP request, no git subprocess, and no state
-          load or ``StateStore.save`` call occurs. The result is a
+          write or ``StateStore.save`` call occurs. The result is a
           fresh ``MigrationResult`` and no orchestrator state is
           mutated.
         - Discovery is recorded separately from the attempt counters:
@@ -242,6 +247,14 @@ class MigrationOrchestrator:
         # is recorded without incrementing any attempt counter.
         issues = self._list_issues()
         result.issues_discovered = len(issues)
+        self._ensure_concrete_state_loaded()
+        result.discovery = DryRunDiscovery(
+            target=self.repo.target,
+            repo_exists=target_repo is not None,
+            comments_discovered=sum(len(issue.get("comments") or []) for issue in issues),
+            state_path=str(getattr(self.state, "state_path", "")),
+            state_migrated=len(self._concrete_migrated),
+        )
         return result
 
     # --- public phase entry points -------------------------------------------
