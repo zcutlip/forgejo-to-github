@@ -200,6 +200,40 @@ class Reporter:
             # "migrated" or "complete" as a success claim. Discovery is
             # not an attempt: the count comes from ``issues_discovered``
             # (``issues_attempted`` stays 0 on a dry run).
+            #
+            # When ``result.discovery`` is present, render the approved
+            # informative preview (target repo, repo outcome, comments,
+            # git status from the result, and checkpoint status). When
+            # discovery is absent, fall back to the concise dry-run
+            # template that was in place before the preview was added.
+            discovery = _get_field(result, "discovery", None)
+            if discovery is not None:
+                target = _get_field(discovery, "target", "")
+                repo_exists_raw = _get_field(discovery, "repo_exists", None)
+                comments_discovered = _get_field(discovery, "comments_discovered", 0)
+                state_path = _get_field(discovery, "state_path", "")
+                state_migrated = _get_field(discovery, "state_migrated", 0)
+                dry_lines = ["Dry-run complete — no changes were made."]
+                if isinstance(target, str) and target:
+                    dry_lines.append(f"Target repo: {target}")
+                if repo_exists_raw is True:
+                    dry_lines.append("Repo: existing")
+                elif repo_exists_raw is False:
+                    dry_lines.append("Repo: would be created")
+                dry_lines.append(
+                    f"Issues: would process {issues_discovered} issues"
+                )
+                dry_lines.append(
+                    f"Comments: would post {int(comments_discovered) if isinstance(comments_discovered, int) else 0}"
+                )
+                dry_lines.append(
+                    f"Git: clone {clone_status}, push {push_status} (dry-run)"
+                )
+                dry_lines.append(
+                    f"State: {state_path} ({int(state_migrated) if isinstance(state_migrated, int) else 0} checkpointed)"
+                )
+                _emit(dry_lines, use_error=False)
+                return
             dry_lines = [
                 "Dry-run complete — no changes were made.",
                 f"dry-run: would process {issues_discovered} issues",
