@@ -9,6 +9,7 @@ Three public dataclasses are exported:
 - :class:`Repository` — immutable per-run inputs (frozen).
 - :class:`IssueFailure` — structured record of one failure.
 - :class:`MigrationResult` — aggregated orchestrator output.
+- :class:`DryRunDiscovery` — dry-run discovery facts (frozen).
 
 These types are part of the locked public contract asserted by
 ``tests/test_orchestration.py`` and ``tests/test_reporting.py``.
@@ -70,6 +71,36 @@ class IssueFailure:
     step: str
 
 
+@dataclass(frozen=True)
+class DryRunDiscovery:
+    """Discovery facts gathered by the dry-run read-only short-circuit.
+
+    Populated only by the dry-run discovery phase and attached to
+    :attr:`MigrationResult.discovery`; it is ``None`` on normal runs.
+    Frozen so the discovery facts cannot be mutated once produced.
+
+    Attributes:
+        target: GitHub repository as ``"owner/repo"`` as supplied by
+            the CLI via :class:`Repository.target`.
+        repo_exists: ``True`` when the read-only ``GET`` against the
+            target repository found it; ``False`` when not found. No
+            repository is created.
+        comments_discovered: Total comments across the discovered
+            source issues, read-only. No comment is posted.
+        state_path: The state file path held by the ``StateStore``.
+            The store is used read-only: state is loaded, never
+            written.
+        state_migrated: Number of issues checkpointed in the loaded
+            state's ``migrated`` mapping.
+    """
+
+    target: str
+    repo_exists: bool
+    comments_discovered: int
+    state_path: str
+    state_migrated: int
+
+
 @dataclass
 class MigrationResult:
     """Aggregated output of one orchestrator run.
@@ -87,6 +118,10 @@ class MigrationResult:
     discovery phase: it carries the number of source issues found by
     the read-only listing while ``issues_attempted`` stays ``0``
     (discovery is not an attempt). It remains ``0`` on normal runs.
+
+    ``discovery`` carries the dry-run discovery facts (see
+    :class:`DryRunDiscovery`); it is populated only on a dry run and
+    stays ``None`` on normal runs.
     """
 
     issues_attempted: int = 0
@@ -103,3 +138,4 @@ class MigrationResult:
     clone_status: str = "skipped"
     push_status: str = "skipped"
     dry_run: bool = False
+    discovery: DryRunDiscovery | None = None
