@@ -251,7 +251,11 @@ class MigrationOrchestrator:
         result.discovery = DryRunDiscovery(
             target=self.repo.target,
             repo_exists=target_repo is not None,
-            comments_discovered=sum(len(issue.get("comments") or []) for issue in issues),
+            comments_discovered=sum(
+                len(comments) if isinstance(comments, list) else int(comments or 0)
+                for issue in issues
+                for comments in [issue.get("comments")]
+            ),
             state_path=str(getattr(self.state, "state_path", "")),
             state_migrated=len(self._concrete_migrated),
         )
