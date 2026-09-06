@@ -342,8 +342,10 @@ class _FakeGitHubForState:
     def close_issue(self, issue_number: int) -> None:
         return None
 
-    def check_repository_exists(self) -> None:
-        return None
+    def check_repository_exists(self) -> dict[str, Any]:
+        # Pre-flight: report the target as existing so the run proceeds
+        # without creating (no prompter is wired in this test).
+        return {"exists": True}
 
     def create_repository(
         self, name: str, description: str | None, public: bool
@@ -436,6 +438,13 @@ def test_github_wiring_creates_issue_and_comment_with_concrete_signatures(
     github_comment_id = 9001
     github_transport = FakeTransport(
         responses=[
+            # Pre-flight target check: existing target with no open issues,
+            # so the run proceeds without creating (no description fetch,
+            # no create POST).
+            FakeResponse(
+                status_code=200,
+                json_payload={"name": "target", "open_issues_count": 0},
+            ),
             FakeResponse(status_code=201, json_payload={"number": github_number}),
             FakeResponse(status_code=201, json_payload={"id": github_comment_id}),
         ]
@@ -473,10 +482,17 @@ def test_github_wiring_creates_issue_and_comment_with_concrete_signatures(
     result = orchestrator.run()
 
     # --- Assert: GitHub receives title/body/labels and GitHub issue number for comment ---
-    assert len(github_transport.calls) >= 2, (
+    assert len(github_transport.calls) >= 3, (
+        f"expected pre-flight check + issue+comment POSTs, got {github_transport.calls!r}"
+    )
+    check_call = github_transport.calls[0]
+    assert check_call.method == "GET"
+    assert check_call.url == "https://api.github.com/repos/owner/target"
+    posts = [c for c in github_transport.calls if c.method == "POST"]
+    assert len(posts) >= 2, (
         f"expected issue+comment POSTs, got {github_transport.calls!r}"
     )
-    issue_call = github_transport.calls[0]
+    issue_call = posts[0]
     assert issue_call.method == "POST"
     assert issue_call.url == "https://api.github.com/repos/owner/target/issues"
     assert isinstance(issue_call.json_body, dict), (
@@ -492,7 +508,7 @@ def test_github_wiring_creates_issue_and_comment_with_concrete_signatures(
         f"labels not forwarded: {issue_call.json_body!r}"
     )
 
-    comment_call = github_transport.calls[1]
+    comment_call = posts[1]
     assert comment_call.method == "POST"
     assert (
         comment_call.url
