@@ -139,3 +139,4 @@ class MigrationResult:
     push_status: str = "skipped"
     dry_run: bool = False
     discovery: DryRunDiscovery | None = None
+    aborted: bool = False

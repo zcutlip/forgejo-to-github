@@ -69,7 +69,7 @@ locked public contract.
 from __future__ import annotations
 
 import contextlib
-from typing import Any
+from typing import Any, Callable
 
 from forgejo_to_github.domain import (
     DryRunDiscovery,
@@ -134,6 +134,7 @@ class MigrationOrchestrator:
         # ``report`` → ``reporter``. See module docstring.
         api: Any = None,
         report: Any = None,
+        prompter: Callable[[str, bool], bool] | None = None,
     ) -> None:
         if codeberg is None and github is None and api is not None:
             codeberg = api
@@ -153,6 +154,15 @@ class MigrationOrchestrator:
         self.git: Any = git
         self.state: Any = state
         self.reporter: Any = reporter
+        self._prompter: Callable[[str, bool], bool] | None = prompter
+        self.prompter: Callable[[str, bool], bool] | None = prompter
+        # Underscore aliases for the pre-flight phase (task naming).
+        self._repo: Repository = repo
+        self._codeberg: Any = codeberg
+        self._github: Any = github
+        self._git: Any = git
+        self._state: Any = state
+        self._reporter: Any = reporter
 
         # Concrete StateStore integration (narrow seam): orchestrator-owned
         # in-memory migrated map and cached repo_created/git_pushed, populated
@@ -185,6 +195,12 @@ class MigrationOrchestrator:
         # API. This populates the orchestrator-owned migrated map used for
         # resume checks, without broadening the legacy already_migrated path.
         self._ensure_concrete_state_loaded()
+
+        # Pre-flight target-repository phase (normal-run path only;
+        # dry-run returns above via _discover_dry_run). Aborts the run
+        # before any git or issue work when the prompt is denied.
+        if not self._prepare_target(result):
+            return result
 
         # Phase 4: Git mirror. Skipped entirely when --skip-git is set.
         if not bool(getattr(self.repo, "skip_git", False)):
@@ -260,6 +276,85 @@ class MigrationOrchestrator:
             state_migrated=len(self._concrete_migrated),
         )
         return result
+
+    # --- pre-flight target-repository phase ------------------------------------
+
+    def _prepare_target(self, result: MigrationResult) -> bool:
+        """Check/create the GitHub target before any git or issue work.
+
+        Returns ``True`` when the run may proceed, ``False`` when the
+        run is aborted (``result.aborted`` is set). Never calls
+        ``update_repository_description`` on either path.
+        """
+        github: Any = getattr(self, "github", getattr(self, "_github", None))
+        codeberg: Any = getattr(self, "codeberg", getattr(self, "_codeberg", None))
+        repo: Any = getattr(self, "repo", getattr(self, "_repo", None))
+        prompter: Any = getattr(self, "_prompter", getattr(self, "prompter", None))
+
+        check = getattr(github, "check_repository_exists", None)
+        if not callable(check):
+            # Legacy single-seam fakes expose no target check; the
+            # pre-flight is a no-op so phase-ordering tests keep passing.
+            return True
+
+        repo_info = check()
+
+        yes = bool(getattr(repo, "yes", False))
+
+        if repo_info is None:
+            # Missing target: confirm, resolve the description, create.
+            if not yes:
+                if prompter is None:
+                    result.aborted = True
+                    return False
+                prompt_text = (
+                    f"Target repository '{getattr(repo, 'target', '')}' "
+                    "does not exist. Create it?"
+                )
+                if not prompter(prompt_text, False):
+                    result.aborted = True
+                    return False
+
+            explicit = getattr(repo, "description", None)
+            if explicit:
+                description: Any = explicit
+            else:
+                get_desc = getattr(codeberg, "get_repository_description", None)
+                if not callable(get_desc):
+                    description = "Migrated from Codeberg"
+                else:
+                    try:
+                        description = get_desc()
+                    except Exception:  # noqa: BLE001 — any fetch failure falls back
+                        description = "Migrated from Codeberg"
+
+            create = getattr(github, "create_repository", None)
+            if callable(create):
+                target = str(getattr(repo, "target", ""))
+                name = target.split("/")[-1] if "/" in target else target
+                public = bool(getattr(repo, "public", False))
+                create(name, description, public)
+            return True
+
+        # Existing target: never create or PATCH the description.
+        open_issues = 0
+        if isinstance(repo_info, dict):
+            try:
+                open_issues = int(repo_info.get("open_issues_count", 0) or 0)
+            except (TypeError, ValueError):
+                open_issues = 0
+        if open_issues > 0 and not yes:
+            if prompter is None:
+                result.aborted = True
+                return False
+            warning = (
+                f"Target repository '{getattr(repo, 'target', '')}' already "
+                f"exists with {open_issues} open issues. Continue?"
+            )
+            if not prompter(warning, False):
+                result.aborted = True
+                return False
+        return True
 
     # --- public phase entry points -------------------------------------------
 

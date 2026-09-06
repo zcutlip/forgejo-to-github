@@ -4,6 +4,7 @@ import argparse
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from forgejo_to_github.codeberg import CodebergClient
@@ -59,6 +60,25 @@ def parse_args() -> argparse.Namespace:
         help='Repo description on GitHub (default: copied from Codeberg, fallback "Migrated from Codeberg")',
     )
     return parser.parse_args()
+
+
+def _make_prompter(repo: Repository) -> Callable[[str, bool], bool]:
+    """Construct a prompter callable for the orchestrator's pre-flight phase.
+
+    When ``repo.yes`` is True, the prompter auto-affirms without reading
+    stdin. Otherwise it prompts via ``input()`` with a ``[y/N]`` suffix
+    and returns True for "y" or "yes" (case-insensitive), False otherwise.
+    """
+    def prompter(prompt: str, default: bool = False) -> bool:
+        if repo.yes:
+            return True
+        try:
+            answer = input(f"{prompt} [y/N] ")
+        except EOFError:
+            return default
+        return answer.strip().lower() in ("y", "yes")
+
+    return prompter
 
 
 def _build_orchestrator(args: argparse.Namespace) -> MigrationOrchestrator:
@@ -157,6 +177,7 @@ def _build_orchestrator(args: argparse.Namespace) -> MigrationOrchestrator:
         git=git,
         state=state,
         reporter=reporter,
+        prompter=_make_prompter(repo),
     )
     return orchestrator
 
