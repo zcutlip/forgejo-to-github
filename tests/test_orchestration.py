@@ -35,6 +35,7 @@ GitHubClient interfaces without weakening behavioral assertions.
 
 from __future__ import annotations
 
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -671,7 +672,6 @@ class _SaveSpyStateStore(StateStore):
         # Spy only: record and delegate nothing — a dry run must never
         # reach the real write path. Recording instead of delegating
         # also guarantees the on-disk file cannot change via this seam.
-        return
 
 
 def test_dry_run_does_not_write_state(tmp_path: Path) -> None:
@@ -1169,9 +1169,7 @@ class _FakeGitHub:
     def create_repository(
         self, name: str, description: str | None, public: bool
     ) -> dict[str, Any]:
-        self.calls.append(
-            ("create_repository", name, str(description), str(public))
-        )
+        self.calls.append(("create_repository", name, str(description), str(public)))
         self.created.append((name, description, public))
         return {"name": name}
 
@@ -1320,8 +1318,7 @@ def test_orchestrator_does_not_touch_description_when_target_exists() -> None:
         f"recorded calls: {github.calls!r}"
     )
     assert not any(c[0] == "create_repository" for c in github.calls), (
-        "an existing target must not be created; "
-        f"recorded calls: {github.calls!r}"
+        f"an existing target must not be created; recorded calls: {github.calls!r}"
     )
     assert not any(c[0] == "update_repository_description" for c in github.calls), (
         "an existing target's description must not be touched, even "
@@ -1390,9 +1387,7 @@ def test_orchestrator_uses_explicit_description_when_provided() -> None:
     ``codeberg.get_repository_description()``.
     """
     github = _FakeGitHub(repo=None)
-    codeberg = _FakeCodeberg(
-        issues=[_issue(1)], description="Codeberg description"
-    )
+    codeberg = _FakeCodeberg(issues=[_issue(1)], description="Codeberg description")
     prompter = _FakePrompter(answer=True)
     repo = Repository(
         source="owner/source",
@@ -1446,9 +1441,7 @@ def test_orchestrator_skips_prompts_when_yes_flag_set() -> None:
     github = _FakeGitHub(repo=None)
     codeberg = _FakeCodeberg(issues=[_issue(1)], description="Test")
     prompter = _FakePrompter(answer=True)
-    repo = Repository(
-        source="owner/source", target="owner/target", yes=True
-    )
+    repo = Repository(source="owner/source", target="owner/target", yes=True)
 
     orch = _build_preflight(
         github=github, codeberg=codeberg, prompter=prompter, repo=repo
@@ -1457,8 +1450,7 @@ def test_orchestrator_skips_prompts_when_yes_flag_set() -> None:
     orch.run()
 
     assert len(prompter.prompts) == 0, (
-        "repo.yes=True must bypass the prompter; "
-        f"prompts={prompter.prompts!r}"
+        f"repo.yes=True must bypass the prompter; prompts={prompter.prompts!r}"
     )
     assert any(c[0] == "create_repository" for c in github.calls), (
         "creation must still proceed when --yes is set; "
@@ -1468,14 +1460,10 @@ def test_orchestrator_skips_prompts_when_yes_flag_set() -> None:
 
 def test_orchestrator_prompts_when_target_has_existing_issues() -> None:
     """An existing target with open issues triggers a warning prompt."""
-    github = _FakeGitHub(
-        repo={"name": "target", "open_issues_count": 5}
-    )
+    github = _FakeGitHub(repo={"name": "target", "open_issues_count": 5})
     codeberg = _FakeCodeberg(issues=[_issue(1)])
     prompter = _FakePrompter(answer=True)
-    repo = Repository(
-        source="owner/source", target="owner/target", yes=False
-    )
+    repo = Repository(source="owner/source", target="owner/target", yes=False)
 
     orch = _build_preflight(
         github=github, codeberg=codeberg, prompter=prompter, repo=repo
@@ -1488,8 +1476,7 @@ def test_orchestrator_prompts_when_target_has_existing_issues() -> None:
         f"prompts={prompter.prompts!r}"
     )
     assert not any(c[0] == "create_repository" for c in github.calls), (
-        "an existing target must not be created; "
-        f"recorded calls: {github.calls!r}"
+        f"an existing target must not be created; recorded calls: {github.calls!r}"
     )
 
 
@@ -1504,12 +1491,10 @@ def test_orchestrator_aborts_when_prompter_returns_false() -> None:
     result = orch.run()
 
     assert not any(c[0] == "create_repository" for c in github.calls), (
-        "a denied prompt must not create the target; "
-        f"recorded calls: {github.calls!r}"
+        f"a denied prompt must not create the target; recorded calls: {github.calls!r}"
     )
     assert not any(c[0] == "create_issue" for c in github.calls), (
-        "a denied prompt must not create any issues; "
-        f"recorded calls: {github.calls!r}"
+        f"a denied prompt must not create any issues; recorded calls: {github.calls!r}"
     )
     assert getattr(result, "aborted", False) is True, (
         "a denied prompt must set result.aborted=True; "
@@ -1538,8 +1523,7 @@ def test_orchestrator_with_null_prompter_treats_prompts_as_denied() -> None:
     result = orch.run()
 
     assert not any(c[0] == "create_repository" for c in github.calls), (
-        "prompter=None must deny creation; "
-        f"recorded calls: {github.calls!r}"
+        f"prompter=None must deny creation; recorded calls: {github.calls!r}"
     )
     assert getattr(result, "aborted", False) is True, (
         "prompter=None must set result.aborted=True; "
@@ -1622,4 +1606,123 @@ def test_orchestrator_runs_preflight_before_git_phase() -> None:
     ], (
         "preflight must run before git clone, which must run before "
         f"issue listing; actual order={order!r}"
+    )
+
+
+# ===========================================================================
+# RED class: F. Pacing between issue mutations (Slice B RED, append-only)
+# ===========================================================================
+#
+# Contract (Slice B): the orchestrator paces successive GitHub
+# issue-mutation calls (create_issue / create_comment / close_issue)
+# with a 0.3 s pause (module constant
+# ``_ISSUE_MUTATION_PAUSE_SECONDS`` in
+# ``forgejo_to_github.migration``, via module-level ``time.sleep``
+# so tests can mock it), restoring the baseline ``main:f2gh.py``
+# behavior of sleeping 0.3 s between consecutive issue mutations.
+#
+# RED-stage expectation: this test fails because the orchestrator
+# currently fires issue-mutation calls as fast as possible with no
+# pacing sleep at all.
+
+
+def test_orchestrator_pauses_between_issue_mutation_calls(monkeypatch: Any) -> None:
+    """Successive GitHub issue mutations are paced with a 0.3 s pause.
+
+    The orchestrator migrates two issues (with comments and a close)
+    with ``skip_git=True``. Every pair of successive issue-mutation
+    calls (create_issue / create_comment / close_issue) must be
+    separated by a ``time.sleep`` pacing call, and every pacing call
+    must pass the 0.3 s module constant.
+    """
+    import forgejo_to_github.migration as migration_mod
+
+    sleep_calls: list[Any] = []
+    timeline: list[tuple[str, Any]] = []
+
+    def _recording_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        timeline.append(("sleep", seconds))
+
+    # Mock the module-level pacing seam. Before GREEN adds
+    # ``import time`` to the migration module, install a stub so the
+    # RED failure is the pacing assertion below (no pacing exists
+    # yet), not a missing-attribute error at mock time.
+    if getattr(migration_mod, "time", None) is None:
+        monkeypatch.setattr(
+            migration_mod,
+            "time",
+            SimpleNamespace(sleep=_recording_sleep),
+            raising=False,
+        )
+    else:
+        monkeypatch.setattr(migration_mod.time, "sleep", _recording_sleep)
+
+    closed_issue = _issue(2, comments=1)
+    closed_issue["closed"] = True
+    api = _FakeApi(issues=[_issue(1, comments=1), closed_issue])
+
+    # Wrap the mutation seam so the shared timeline interleaves
+    # mutations with pacing sleeps in call order.
+    real_create_issue = api.create_issue
+    real_create_comment = api.create_comment
+
+    def _timed_create_issue(title: str, body: str, labels: list[str]) -> int:
+        github_number = real_create_issue(title, body, labels)
+        timeline.append(("mutation", "create_issue"))
+        return github_number
+
+    def _timed_create_comment(github_number: int, body: str) -> int:
+        comment_id = real_create_comment(github_number, body)
+        timeline.append(("mutation", "create_comment"))
+        return comment_id
+
+    def _timed_close_issue(github_number: int) -> None:
+        timeline.append(("mutation", "close_issue"))
+        api.calls.append(("close_issue", str(int(github_number) - 100)))
+
+    api.create_issue = _timed_create_issue  # type: ignore[method-assign]
+    api.create_comment = _timed_create_comment  # type: ignore[method-assign]
+    api.close_issue = _timed_close_issue  # type: ignore[attr-defined]
+
+    repo = Repository(source="owner/source", target="owner/target", skip_git=True)
+    orch = MigrationOrchestrator(
+        repo=repo,
+        api=api,
+        git=_FakeGit(),
+        state=_FakeState(),
+        report=_FakeReport(),
+    )
+
+    orch.run()
+
+    mutation_indices = [i for i, event in enumerate(timeline) if event[0] == "mutation"]
+    assert len(mutation_indices) >= 2, (
+        "expected at least two GitHub issue-mutation calls "
+        f"(create_issue/create_comment/close_issue); timeline={timeline!r}"
+    )
+
+    pacing: list[Any] = []
+    for first, second in pairwise(mutation_indices):
+        gap = [e for e in timeline[first + 1 : second] if e[0] == "sleep"]
+        assert gap, (
+            "expected a pacing sleep between successive GitHub "
+            "issue-mutation calls; "
+            f"gap between timeline[{first}]={timeline[first]!r} and "
+            f"timeline[{second}]={timeline[second]!r} has no sleep; "
+            f"timeline={timeline!r}"
+        )
+        pacing.extend(seconds for _, seconds in gap)
+
+    assert pacing, (
+        "expected at least one pacing sleep between successive GitHub "
+        f"issue-mutation calls; timeline={timeline!r}"
+    )
+    expected_pause = getattr(migration_mod, "_ISSUE_MUTATION_PAUSE_SECONDS", 0.3)
+    assert expected_pause == 0.3, (
+        f"the pacing constant must be 0.3 s; got {expected_pause!r}"
+    )
+    assert all(seconds == expected_pause for seconds in pacing), (
+        "every pacing call must pass the 0.3 s module constant; "
+        f"pacing={pacing!r}, expected={expected_pause!r}"
     )
