@@ -315,8 +315,13 @@ and the CLI wiring (`06-cli-wiring.md`) defer to it.
 The policy, in order of precedence:
 
 1. **Explicit `--description` wins.** If `repo.description` is non-empty, it is
-   used. The orchestrator calls `github.update_repository_description(...)`
-   immediately after repository creation.
+   passed to `github.create_repository(...)` as part of the create payload. The
+   orchestrator does **not** call `github.update_repository_description(...)`
+   after creation; the description is folded into the create call, matching the
+   `main:f2gh.py` behavioral baseline (see `audit-remediation.md`  row #6). The
+   `update_repository_description` client method remains unit-tested
+   (`test_github_update_repository_description_patches_description`) but is not
+   invoked by the orchestrator.
 2. **Otherwise, use the Codeberg description.** When no explicit description
    was supplied and the target repo did not exist, the orchestrator fetches
    the source description via `codeberg.get_repository_description()` and
