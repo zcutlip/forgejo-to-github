@@ -47,8 +47,10 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
+from unittest.mock import patch
 
 import pytest
+
 from forgejo_to_github.github import GitHubClient
 
 # ---------------------------------------------------------------------------
@@ -430,9 +432,11 @@ def test_create_issue_auth_errors_raise_github_auth_error(status: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_403_with_zero_rate_limit_remaining_raises_rate_limit_error() -> None:
-    """A 403 with ``X-RateLimit-Remaining: 0`` translates to
-    ``GitHubRateLimitError`` carrying the reset timestamp.
+def test_403_with_zero_rate_limit_remaining_retries_then_raises() -> None:
+    """A 403 with ``X-RateLimit-Remaining: 0`` is a primary-rate-limit
+    signal: the client retries it (like a 429) and, after three
+    consecutive rate-limited attempts, terminates with a structured
+    ``GitHubRateLimitError``.
     """
     transport = FakeTransport(
         responses=[
@@ -442,19 +446,54 @@ def test_403_with_zero_rate_limit_remaining_raises_rate_limit_error() -> None:
                 headers={
                     "X-RateLimit-Remaining": "0",
                     "X-RateLimit-Reset": "1700000000",
+                    "Retry-After": "2",
                 },
-            )
+            ),
+            FakeResponse(
+                status_code=403,
+                json_payload={"message": "API rate limit exceeded"},
+                headers={
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": "1700000000",
+                    "Retry-After": "2",
+                },
+            ),
+            FakeResponse(
+                status_code=403,
+                json_payload={"message": "API rate limit exceeded"},
+                headers={
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": "1700000000",
+                    "Retry-After": "2",
+                },
+            ),
         ]
     )
     client = _client(transport)
 
     from forgejo_to_github.github import GitHubRateLimitError
 
-    with pytest.raises(GitHubRateLimitError) as excinfo:
+    sleep_calls: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        sleep_calls.append(s)
+
+    with patch("forgejo_to_github.github.time.sleep", side_effect=fake_sleep), pytest.raises(
+        GitHubRateLimitError
+    ) as excinfo:
         client.create_issue(title="t", body="b", labels=[])
 
     err = excinfo.value
     assert err.reset == 1700000000
+
+    # 1 initial attempt + 2 retries before giving up.
+    assert len(transport.calls) == 3
+    assert all(c.method == "POST" for c in transport.calls)
+
+    # One sleep per retry, each Retry-After plus additive jitter [0, 1.0].
+    assert len(sleep_calls) == 2
+    for slept in sleep_calls:
+        assert 2.0 <= slept <= 3.0
 
 
 def test_rate_limit_429_is_retried_then_terminates_with_rate_limit_error() -> None:
@@ -471,9 +510,79 @@ def test_rate_limit_429_is_retried_then_terminates_with_rate_limit_error() -> No
 
     from forgejo_to_github.github import GitHubRateLimitError
 
-    with pytest.raises(GitHubRateLimitError):
+    sleep_calls: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        sleep_calls.append(s)
+
+    with patch("forgejo_to_github.github.time.sleep", side_effect=fake_sleep), pytest.raises(
+        GitHubRateLimitError
+    ):
         client.create_issue(title="t", body="b", labels=[])
 
     # Three attempts before giving up; no fourth request issued.
     assert len(transport.calls) == 3
     assert all(c.method == "POST" for c in transport.calls)
+
+    # One sleep per retry, each Retry-After plus additive jitter [0, 1.0].
+    assert len(sleep_calls) == 2
+    for slept in sleep_calls:
+        assert 1.0 <= slept <= 2.0
+
+
+def test_github_client_retry_includes_jitter() -> None:
+    """A single 429 followed by success sleeps once: ``Retry-After``
+    plus additive jitter in ``[0, _JITTER_SECONDS]`` (``_JITTER_SECONDS``
+    is ``1.0``), then returns normally.
+    """
+    rate_limited = FakeResponse(
+        status_code=429,
+        json_payload={"message": "secondary rate limit"},
+        headers={"Retry-After": "2"},
+    )
+    ok = FakeResponse(status_code=201, json_payload={"number": 7})
+    transport = FakeTransport(responses=[rate_limited, ok])
+    client = _client(transport)
+
+    sleep_calls: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        sleep_calls.append(s)
+
+    with patch("forgejo_to_github.github.time.sleep", side_effect=fake_sleep):
+        number = client.create_issue(title="t", body="b", labels=[])
+
+    assert number == 7
+    assert len(transport.calls) == 2
+    assert len(sleep_calls) == 1
+    assert 2.0 <= sleep_calls[0] <= 3.0
+
+
+def test_github_client_proactive_sleep_when_remaining_low() -> None:
+    """A 200 response with ``X-RateLimit-Remaining`` below the
+    low-water mark (10) triggers a proactive ``time.sleep(2)`` so the
+    client backs off before the primary limit is hit. The request
+    itself still returns normally.
+    """
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(
+                status_code=201,
+                json_payload={"number": 7},
+                headers={"X-RateLimit-Remaining": "3"},
+            )
+        ]
+    )
+    client = _client(transport)
+
+    sleep_calls: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        sleep_calls.append(s)
+
+    with patch("forgejo_to_github.github.time.sleep", side_effect=fake_sleep):
+        number = client.create_issue(title="t", body="b", labels=[])
+
+    assert number == 7
+    assert len(transport.calls) == 1
+    assert sleep_calls == [2]
