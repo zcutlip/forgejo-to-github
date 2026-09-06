@@ -40,6 +40,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import requests
 
 from forgejo_to_github.codeberg import CodebergClient
 from forgejo_to_github.domain import Repository
@@ -1097,4 +1098,528 @@ def test_dry_run_summary_reports_state_checkpoint(tmp_path: Path) -> None:
     assert store.save_calls == [], (
         "StateStore.save must not be called during a dry run; "
         f"recorded calls: {store.save_calls!r}"
+    )
+
+
+# ===========================================================================
+# RED class: E. Preflight target-repository phase (append-only)
+# ===========================================================================
+#
+# Contract (locked in ``plans/02-package-refactor-and-test-foundation/
+# audit-remediation.md`` §4.1/§4.5, Slice A): before any git or issue
+# work, the orchestrator performs a preflight phase against the GitHub
+# target:
+#
+# - ``github.check_repository_exists()`` decides whether the target
+#   exists.
+# - When the target is missing, the orchestrator resolves the
+#   description (explicit ``repo.description`` wins; otherwise
+#   ``codeberg.get_repository_description()``; on fetch failure the
+#   ``"Migrated from Codeberg"`` fallback), confirms via the injected
+#   ``prompter`` seam (locked signature ``prompter(prompt: str,
+#   default: bool) -> bool``), and creates the target with
+#   ``github.create_repository(name, description, public)`` — the
+#   description folded into the create payload.
+# - The orchestrator never calls ``update_repository_description``:
+#   neither after creation nor for an existing target, regardless of
+#   whether ``--description`` was supplied.
+#
+# RED-stage expectation: all three tests fail because the current
+# orchestrator has no preflight phase — the constructor does not accept
+# a ``prompter`` seam and ``run()`` never consults
+# ``check_repository_exists`` / ``create_repository`` on the normal
+# (non-dry-run) path.
+
+
+class _FakePrompter:
+    """Recording prompter seam matching the locked callable contract.
+
+    The locked prompter signature is ``prompter(prompt: str,
+    default: bool) -> bool`` (audit-remediation.md §4.5). The fake
+    returns a scripted answer and records every prompt it is asked.
+    """
+
+    def __init__(self, answer: bool = True) -> None:
+        self.answer = answer
+        self.prompts: list[tuple[str, bool]] = []
+
+    def __call__(self, prompt: str, default: bool) -> bool:
+        self.prompts.append((prompt, default))
+        return self.answer
+
+
+class _FakeGitHub:
+    """Recording fake for the GitHub seam (preflight phase).
+
+    Mirrors the concrete ``GitHubClient`` signatures:
+    ``check_repository_exists() -> dict | None``,
+    ``create_repository(name, description, public) -> dict``, and
+    ``update_repository_description(description) -> None``.
+    """
+
+    def __init__(self, repo: dict[str, Any] | None = None) -> None:
+        self.repo = repo
+        self.calls: list[tuple[str, ...]] = []
+        self.created: list[tuple[str, str | None, bool]] = []
+
+    def check_repository_exists(self) -> dict[str, Any] | None:
+        self.calls.append(("check_repository_exists",))
+        return self.repo
+
+    def create_repository(
+        self, name: str, description: str | None, public: bool
+    ) -> dict[str, Any]:
+        self.calls.append(
+            ("create_repository", name, str(description), str(public))
+        )
+        self.created.append((name, description, public))
+        return {"name": name}
+
+    def update_repository_description(self, description: str) -> None:
+        self.calls.append(("update_repository_description", description))
+
+
+class _FakeCodeberg:
+    """Recording fake for the Codeberg seam (preflight phase).
+
+    Mirrors the concrete ``CodebergClient`` signatures:
+    ``list_issues(state="all") -> list[dict]`` and
+    ``get_repository_description() -> str``.
+    """
+
+    def __init__(
+        self,
+        issues: list[dict[str, Any]] | None = None,
+        description: str = "",
+        description_error: Exception | None = None,
+    ) -> None:
+        self.issues = list(issues or [])
+        self.description = description
+        self.description_error = description_error
+        self.calls: list[tuple[str, ...]] = []
+
+    def list_issues(self, state: str = "all") -> list[dict[str, Any]]:
+        self.calls.append(("list_issues", state))
+        return list(self.issues)
+
+    def get_repository_description(self) -> str:
+        self.calls.append(("get_repository_description",))
+        if self.description_error is not None:
+            raise self.description_error
+        return self.description
+
+
+def _build_preflight(
+    *,
+    github: _FakeGitHub,
+    codeberg: _FakeCodeberg,
+    prompter: _FakePrompter,
+    repo: Repository | None = None,
+    git: _FakeGit | None = None,
+    state: _FakeState | None = None,
+    report: _FakeReport | None = None,
+) -> MigrationOrchestrator:
+    """Construct an orchestrator with preflight fakes and a prompter seam.
+
+    The ``prompter`` keyword is part of the locked preflight contract
+    (``prompter: Callable[[str, bool], bool] | None = None``); the
+    current constructor does not accept it, which is the RED failure
+    these tests are written against.
+    """
+    if repo is None:
+        repo = Repository(source="owner/source", target="owner/target")
+    return MigrationOrchestrator(
+        repo=repo,
+        codeberg=codeberg,
+        github=github,
+        git=git if git is not None else _FakeGit(),
+        state=state if state is not None else _FakeState(),
+        reporter=report if report is not None else _FakeReport(),
+        prompter=prompter,
+    )
+
+
+# --- E.1 missing target is created with the source description -------------
+
+
+def test_orchestrator_creates_target_when_missing() -> None:
+    """A missing target (check returns None) is created with the source description.
+
+    The preflight phase must fetch the source description, confirm via
+    the prompter seam, and create the target repository with that
+    description folded into the create payload. It must not follow up
+    with a description PATCH, and the run must continue into issue
+    migration (not aborted).
+    """
+    github = _FakeGitHub(repo=None)
+    codeberg = _FakeCodeberg(issues=[_issue(1)], description="Test description")
+    prompter = _FakePrompter(answer=True)
+
+    orch = _build_preflight(github=github, codeberg=codeberg, prompter=prompter)
+
+    result = orch.run()
+
+    # Preflight consulted the target check and the source description.
+    assert ("check_repository_exists",) in github.calls, (
+        "preflight must check whether the target exists; "
+        f"recorded calls: {github.calls!r}"
+    )
+    assert ("get_repository_description",) in codeberg.calls, (
+        "a missing target without an explicit description must fetch "
+        f"the source description; recorded calls: {codeberg.calls!r}"
+    )
+    create_call = ("create_repository", "target", "Test description", "False")
+    assert create_call in github.calls, (
+        "a missing target must be created with the source description; "
+        f"recorded calls: {github.calls!r}"
+    )
+    # The description is folded into the create payload; no follow-up PATCH.
+    assert not any(c[0] == "update_repository_description" for c in github.calls), (
+        "the description must be set at creation time, not via a "
+        f"follow-up PATCH; recorded calls: {github.calls!r}"
+    )
+    # The run is not aborted: issue migration proceeded.
+    assert result.issues_attempted == 1, (
+        "a confirmed preflight must not abort the run; issue migration "
+        f"must proceed; issues_attempted={result.issues_attempted!r}"
+    )
+    assert not getattr(result, "aborted", False), (
+        "a confirmed preflight must not mark the result aborted; "
+        f"result.aborted={getattr(result, 'aborted', '<missing>')!r}"
+    )
+
+
+# --- E.2 existing target: neither created nor description-PATCHed ----------
+
+
+def test_orchestrator_does_not_touch_description_when_target_exists() -> None:
+    """An existing target is neither created nor description-PATCHed.
+
+    When ``check_repository_exists`` returns a repo dict, the preflight
+    phase must leave the target alone: no ``create_repository`` and no
+    ``update_repository_description``, even when the run carries an
+    explicit ``--description``.
+    """
+    github = _FakeGitHub(repo={"name": "target", "open_issues_count": 0})
+    codeberg = _FakeCodeberg(issues=[_issue(1)], description="Source description")
+    prompter = _FakePrompter(answer=True)
+    repo = Repository(
+        source="owner/source",
+        target="owner/target",
+        description="Explicit description",
+    )
+
+    orch = _build_preflight(
+        github=github, codeberg=codeberg, prompter=prompter, repo=repo
+    )
+
+    result = orch.run()
+
+    assert ("check_repository_exists",) in github.calls, (
+        "preflight must check whether the target exists; "
+        f"recorded calls: {github.calls!r}"
+    )
+    assert not any(c[0] == "create_repository" for c in github.calls), (
+        "an existing target must not be created; "
+        f"recorded calls: {github.calls!r}"
+    )
+    assert not any(c[0] == "update_repository_description" for c in github.calls), (
+        "an existing target's description must not be touched, even "
+        f"with an explicit --description; recorded calls: {github.calls!r}"
+    )
+    # The run is not aborted: issue migration proceeded.
+    assert result.issues_attempted == 1, (
+        "an existing target must not abort the run; issue migration "
+        f"must proceed; issues_attempted={result.issues_attempted!r}"
+    )
+
+
+# --- E.3 source description fetch failure falls back ------------------------
+
+
+def test_orchestrator_uses_fallback_description_on_source_fetch_failure() -> None:
+    """A failing source description fetch falls back to the default.
+
+    When ``codeberg.get_repository_description`` raises, the preflight
+    phase must not abort: it creates the missing target with the
+    ``"Migrated from Codeberg"`` fallback description.
+    """
+    github = _FakeGitHub(repo=None)
+    codeberg = _FakeCodeberg(
+        issues=[_issue(1)],
+        description_error=requests.HTTPError(
+            "simulated source description fetch failure"
+        ),
+    )
+    prompter = _FakePrompter(answer=True)
+
+    orch = _build_preflight(github=github, codeberg=codeberg, prompter=prompter)
+
+    result = orch.run()
+
+    assert ("get_repository_description",) in codeberg.calls, (
+        "a missing target without an explicit description must attempt "
+        f"the source description fetch; recorded calls: {codeberg.calls!r}"
+    )
+    fallback_call = (
+        "create_repository",
+        "target",
+        "Migrated from Codeberg",
+        "False",
+    )
+    assert fallback_call in github.calls, (
+        "a source description fetch failure must fall back to "
+        f'"Migrated from Codeberg"; recorded calls: {github.calls!r}'
+    )
+    # The run is not aborted: issue migration proceeded.
+    assert result.issues_attempted == 1, (
+        "a description fetch failure must not abort the run; issue "
+        f"migration must proceed; issues_attempted={result.issues_attempted!r}"
+    )
+
+
+# --- E.4 explicit description wins over Codeberg description --------------
+
+
+def test_orchestrator_uses_explicit_description_when_provided() -> None:
+    """An explicit --description wins; the Codeberg fetch is not called.
+
+    When ``repo.description`` is non-empty and the target is missing,
+    the orchestrator must use the explicit description in the
+    ``create_repository`` payload and must NOT call
+    ``codeberg.get_repository_description()``.
+    """
+    github = _FakeGitHub(repo=None)
+    codeberg = _FakeCodeberg(
+        issues=[_issue(1)], description="Codeberg description"
+    )
+    prompter = _FakePrompter(answer=True)
+    repo = Repository(
+        source="owner/source",
+        target="owner/target",
+        description="Explicit description",
+    )
+
+    orch = _build_preflight(
+        github=github, codeberg=codeberg, prompter=prompter, repo=repo
+    )
+
+    orch.run()
+
+    create_call = (
+        "create_repository",
+        "target",
+        "Explicit description",
+        "False",
+    )
+    assert create_call in github.calls, (
+        "the explicit description must be used in the create payload; "
+        f"recorded calls: {github.calls!r}"
+    )
+    assert not any(c[0] == "get_repository_description" for c in codeberg.calls), (
+        "an explicit description must skip the Codeberg description fetch; "
+        f"recorded calls: {codeberg.calls!r}"
+    )
+
+
+# --- E.5 prompts ----------------------------------------------------------
+
+
+def test_orchestrator_prompts_before_creating_target() -> None:
+    """The prompter is called once before create_repository when target missing."""
+    github = _FakeGitHub(repo=None)
+    codeberg = _FakeCodeberg(issues=[_issue(1)], description="Test")
+    prompter = _FakePrompter(answer=True)
+
+    orch = _build_preflight(github=github, codeberg=codeberg, prompter=prompter)
+
+    orch.run()
+
+    assert len(prompter.prompts) == 1, (
+        "the prompter must be called exactly once before creating the "
+        f"target; prompts={prompter.prompts!r}"
+    )
+
+
+def test_orchestrator_skips_prompts_when_yes_flag_set() -> None:
+    """repo.yes=True bypasses the prompter; creation proceeds directly."""
+    github = _FakeGitHub(repo=None)
+    codeberg = _FakeCodeberg(issues=[_issue(1)], description="Test")
+    prompter = _FakePrompter(answer=True)
+    repo = Repository(
+        source="owner/source", target="owner/target", yes=True
+    )
+
+    orch = _build_preflight(
+        github=github, codeberg=codeberg, prompter=prompter, repo=repo
+    )
+
+    orch.run()
+
+    assert len(prompter.prompts) == 0, (
+        "repo.yes=True must bypass the prompter; "
+        f"prompts={prompter.prompts!r}"
+    )
+    assert any(c[0] == "create_repository" for c in github.calls), (
+        "creation must still proceed when --yes is set; "
+        f"recorded calls: {github.calls!r}"
+    )
+
+
+def test_orchestrator_prompts_when_target_has_existing_issues() -> None:
+    """An existing target with open issues triggers a warning prompt."""
+    github = _FakeGitHub(
+        repo={"name": "target", "open_issues_count": 5}
+    )
+    codeberg = _FakeCodeberg(issues=[_issue(1)])
+    prompter = _FakePrompter(answer=True)
+    repo = Repository(
+        source="owner/source", target="owner/target", yes=False
+    )
+
+    orch = _build_preflight(
+        github=github, codeberg=codeberg, prompter=prompter, repo=repo
+    )
+
+    orch.run()
+
+    assert len(prompter.prompts) == 1, (
+        "a target with existing issues must trigger a warning prompt; "
+        f"prompts={prompter.prompts!r}"
+    )
+    assert not any(c[0] == "create_repository" for c in github.calls), (
+        "an existing target must not be created; "
+        f"recorded calls: {github.calls!r}"
+    )
+
+
+def test_orchestrator_aborts_when_prompter_returns_false() -> None:
+    """A denied prompt aborts: no create_repository, no create_issue."""
+    github = _FakeGitHub(repo=None)
+    codeberg = _FakeCodeberg(issues=[_issue(1)], description="Test")
+    prompter = _FakePrompter(answer=False)
+
+    orch = _build_preflight(github=github, codeberg=codeberg, prompter=prompter)
+
+    result = orch.run()
+
+    assert not any(c[0] == "create_repository" for c in github.calls), (
+        "a denied prompt must not create the target; "
+        f"recorded calls: {github.calls!r}"
+    )
+    assert not any(c[0] == "create_issue" for c in github.calls), (
+        "a denied prompt must not create any issues; "
+        f"recorded calls: {github.calls!r}"
+    )
+    assert getattr(result, "aborted", False) is True, (
+        "a denied prompt must set result.aborted=True; "
+        f"result.aborted={getattr(result, 'aborted', '<missing>')!r}"
+    )
+
+
+def test_orchestrator_with_null_prompter_treats_prompts_as_denied() -> None:
+    """prompter=None (the default) is deny-by-default: no mutations occur."""
+    github = _FakeGitHub(repo=None)
+    codeberg = _FakeCodeberg(issues=[_issue(1)], description="Test")
+
+    # prompter defaults to None in _build_preflight's signature — but since
+    # _FakePrompter is the type hint, pass None explicitly.
+    repo = Repository(source="owner/source", target="owner/target")
+    orch = MigrationOrchestrator(
+        repo=repo,
+        codeberg=codeberg,
+        github=github,
+        git=_FakeGit(),
+        state=_FakeState(),
+        reporter=_FakeReport(),
+        prompter=None,
+    )
+
+    result = orch.run()
+
+    assert not any(c[0] == "create_repository" for c in github.calls), (
+        "prompter=None must deny creation; "
+        f"recorded calls: {github.calls!r}"
+    )
+    assert getattr(result, "aborted", False) is True, (
+        "prompter=None must set result.aborted=True; "
+        f"result.aborted={getattr(result, 'aborted', '<missing>')!r}"
+    )
+
+
+# --- E.6 phase ordering ---------------------------------------------------
+
+
+def test_orchestrator_runs_preflight_before_git_phase() -> None:
+    """Preflight (check + create) runs before git clone, which runs before issues.
+
+    The call order must be:
+        check_repository_exists → create_repository → git clone → list_issues
+    """
+    order: list[str] = []
+
+    github = _FakeGitHub(repo=None)
+    codeberg = _FakeCodeberg(issues=[_issue(1)], description="Test")
+
+    # Wrap the fakes to record into the shared order list.
+    original_check = github.check_repository_exists
+    original_create = github.create_repository
+
+    def ordered_check() -> dict[str, Any] | None:
+        order.append("check_repository_exists")
+        return original_check()
+
+    def ordered_create(
+        name: str, description: str | None, public: bool
+    ) -> dict[str, Any]:
+        order.append("create_repository")
+        return original_create(name, description, public)
+
+    github.check_repository_exists = ordered_check  # type: ignore[method-assign]
+    github.create_repository = ordered_create  # type: ignore[method-assign]
+
+    original_list = codeberg.list_issues
+
+    def ordered_list(state: str = "all") -> list[dict[str, Any]]:
+        order.append("list_issues")
+        return original_list(state)
+
+    codeberg.list_issues = ordered_list  # type: ignore[method-assign]
+
+    class _OrderedGit:
+        def clone(self) -> str:
+            order.append("git.clone")
+            return "/tmp/fake-clone"
+
+        def push_branches(self, local_path: str) -> None:
+            pass
+
+        def push_tags(self, local_path: str) -> None:
+            pass
+
+        def cleanup(self, local_path: str) -> None:
+            pass
+
+    prompter = _FakePrompter(answer=True)
+    repo = Repository(source="owner/source", target="owner/target")
+    orch = MigrationOrchestrator(
+        repo=repo,
+        codeberg=codeberg,
+        github=github,
+        git=_OrderedGit(),
+        state=_FakeState(),
+        reporter=_FakeReport(),
+        prompter=prompter,
+    )
+
+    orch.run()
+
+    assert order == [
+        "check_repository_exists",
+        "create_repository",
+        "git.clone",
+        "list_issues",
+    ], (
+        "preflight must run before git clone, which must run before "
+        f"issue listing; actual order={order!r}"
     )

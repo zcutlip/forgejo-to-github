@@ -268,3 +268,53 @@ def test_parse_args_returns_namespace_with_expected_attributes(
         "expected attributes missing from Namespace: "
         + repr(expected_attrs - set(vars(args)))
     )
+
+
+# ---------------------------------------------------------------------------
+# 6. CLI prompter helper
+# ---------------------------------------------------------------------------
+
+
+def test_cli_prompter_bypasses_when_yes_flag_set() -> None:
+    """The CLI prompter helper returns True without reading stdin when yes=True.
+
+    ``f2gh._make_prompter`` constructs a ``prompter(prompt, default) -> bool``
+    callable. When ``Repository.yes`` is True, the returned callable must
+    immediately return True without prompting — no stdin access.
+    """
+    from forgejo_to_github.domain import Repository
+
+    repo = Repository(
+        source="owner/source", target="owner/target", yes=True
+    )
+    prompter = f2gh._make_prompter(repo)
+
+    # A fake stdin that would fail if read.
+    sentinel = object()
+    with patch.object(sys, "stdin", sentinel):
+        result = prompter("Proceed?", False)
+
+    assert result is True, (
+        f"yes=True must return True without prompting; got {result!r}"
+    )
+
+
+def test_cli_prompter_reads_stdin_when_yes_flag_unset() -> None:
+    """The CLI prompter helper reads stdin and returns True for 'yes'.
+
+    When ``Repository.yes`` is False, the returned callable must prompt
+    via ``input()`` and return True when the user types "yes".
+    """
+    from forgejo_to_github.domain import Repository
+
+    repo = Repository(
+        source="owner/source", target="owner/target", yes=False
+    )
+    prompter = f2gh._make_prompter(repo)
+
+    with patch("builtins.input", return_value="yes"):
+        result = prompter("Proceed?", False)
+
+    assert result is True, (
+        f"input 'yes' must return True; got {result!r}"
+    )
