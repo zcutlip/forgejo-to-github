@@ -101,6 +101,7 @@ Methods:
 | `issue_succeeded(source_number: int, github_number: int)` | `output` | Emit a "Created issue #M on GitHub" line. |
 | `issue_failed(source_number: int, kind: str, message: str)` | `error_output` | Emit a "FAILED [kind] CB #N: message" line. |
 | `comment_skipped(source_number: int, reason: str)` | `error_output` | Emit a one-line "SKIPPED [comment] CB #N: reason" warning when a source comment is skipped as malformed (non-`"Comment"` type, empty/missing body, or missing author). A skip is not a failure: the issue still proceeds and can still succeed. |
+| `issue_skipped(source_number: int)` | `output` | Emit a one-line "SKIP CB #N: already migrated" notice when an issue is in `state.migrated` and the orchestrator resumes past it. A resume skip is expected behavior, not an anomaly and not a failure: it routes to the normal output sink (unlike `comment_skipped`). |
 | `git_phase_finished(status: str)` | `output` or `error_output` based on status | Emit a one-line summary of the Git phase. `"failed"` routes to `error_output`; `"ok"` and `"skipped"` route to `output`. |
 | `render_final(result: MigrationResult)` | both sinks, mixed based on success/failure | Emit the final summary. Idempotent in that calling it twice yields two full summaries (the CLI calls it exactly once). The summary header and counters go to `output`; failure listings and advisory-named lines go to `error_output`. |
 | `exit_outcome(result: MigrationResult) -> int` | n/a | Return 0 on complete success, the documented "incomplete" code on partial failure, the documented "failure" code on terminal failure, and 0 on dry-run regardless of underlying state. The CLI maps this to `sys.exit`. |
@@ -301,7 +302,7 @@ Package boundary:
   (same)
 - `tests/test_package_boundaries.py::test_public_class_has_at_least_two_public_methods`
   (same)
-- `tests/test_package_boundaries.py::test_public_class_has_at_most_seven_public_methods`
+- `tests/test_package_boundaries.py::test_public_class_has_at_most_nine_public_methods`
   (same)
 
 Legacy parity (must remain green throughout this stage):

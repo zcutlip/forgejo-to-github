@@ -753,6 +753,32 @@ finding §3.1 (`git_pushed` not persisted), additional finding §3.2
 **Out of scope for Slice E:** the prompter (Slice A), pacing (Slice B),
 labels (Slice C), comments (Slice D), small fixes (Slice F).
 
+**Decisions (user-approved, 2026-09-07):**
+
+1. `issue_skipped` routing: stdout — a resume skip is expected
+   behavior, not an anomaly (unlike `comment_skipped`, which routes
+   to stderr).
+2. No aggregate resume banner: the per-issue `issue_skipped` lines
+   are the visible reporting finding §3.2 asks for; the final summary
+   already carries the aggregate.
+3. Public-method cap raised globally from seven to nine (covers
+   Slice D's `comment_skipped` bump and Slice E's `issue_skipped`).
+   The per-class allowance dict added during Slice D is retired in
+   favor of the single global cap; the boundary test is renamed
+   `test_public_class_has_at_most_seven_public_methods` →
+   `test_public_class_has_at_most_nine_public_methods` so the name
+   matches the enforced cap; spec prose amended in
+   `test-framework-spec.md` §14.5 and `07-completion.md` criterion 8
+   (the prose had drifted stale after Slice D — flagged during the
+   Slice E cap discussion).
+4. The `Reporter` seam cleanup that would return it to the original
+   seven-method cap (moving `render_final`/`exit_outcome` to the CLI
+   layer) is deferred to GitHub issue #7 — post-remediation.
+5. Scope addition (per the ledger's RED list): existing
+   `tests/test_migration_reporting.py::test_successful_issues_are_checkpointed_and_resume_filters_them`
+   is augmented to assert `issues_attempted` excludes resumed issues
+   (test modification, covered by the Slice E RED reopen).
+
 **RED tests (all `to be added` unless noted):**
 
 - `test_issues_attempted_excludes_resumed_issues`

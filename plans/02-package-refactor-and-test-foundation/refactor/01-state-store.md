@@ -249,7 +249,7 @@ green at the end of this stage:
   (same)
 - `tests/test_package_boundaries.py::test_public_class_has_at_least_two_public_methods`
   (same)
-- `tests/test_package_boundaries.py::test_public_class_has_at_most_seven_public_methods`
+- `tests/test_package_boundaries.py::test_public_class_has_at_most_nine_public_methods`
   (same)
 - `tests/test_package_boundaries.py::test_state_store_constructor_requires_path_source_target`
 - `tests/test_package_boundaries.py::test_state_store_exposes_load_and_save_methods`

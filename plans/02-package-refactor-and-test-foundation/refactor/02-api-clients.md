@@ -363,7 +363,7 @@ Package boundary:
   (same)
 - `tests/test_package_boundaries.py::test_public_class_has_at_least_two_public_methods`
   (same)
-- `tests/test_package_boundaries.py::test_public_class_has_at_most_seven_public_methods`
+- `tests/test_package_boundaries.py::test_public_class_has_at_most_nine_public_methods`
   (same)
 
 Legacy parity (must remain green throughout this stage):

@@ -136,6 +136,11 @@ Top-level orchestration entry point. Performs these phases in order:
 5. **Issue migration.**
    - `state.load()` to obtain the `MigrationState`.
    - `codeberg.list_issues()` to enumerate.
+   - For each issue: if its `number` is in `state.migrated`, emit
+     `reporter.issue_skipped(source_number)` and continue to the next
+     issue. Resumed issues are **not** counted in `issues_attempted` —
+     that counter increments only when the orchestrator actually
+     begins an issue (Slice E remediation, audit finding #10).
    - For each issue whose `number` is not in `state.migrated`:
      - `reporter.issue_started(source_number=..., total=...)`.
      - `github.create_issue(...)`.
@@ -238,6 +243,17 @@ behavior for this plan.
   is invoked once at the end of the Git phase.
 - **Cleanup.** `git.cleanup(local_path)` is called from the Git phase
   in a `finally`. The cleanup call survives push failure.
+- **`git_pushed` persistence and resume.** After a successful push
+  (branch and tag pushes both completed), the orchestrator sets
+  `git_pushed = True` and persists it through the existing concrete
+  save path — `MigrationState.git_pushed` and `StateStore.save`
+  already carry the field, so no schema change is needed. On resume,
+  when the loaded state has `git_pushed == True`, the orchestrator
+  skips the **entire** Git phase — both clone and push, matching the
+  `main:f2gh.py` baseline — and records `git["clone"] = "skipped"`
+  and `git["push"] = "skipped"`. When `git_pushed` is `False` (the
+  push failed or never ran), the Git phase runs in full on resume.
+  (Slice E remediation, audit finding §3.1.)
 
 ### 3.6 `Repository`
 
@@ -476,7 +492,7 @@ Package boundary:
   (same)
 - `tests/test_package_boundaries.py::test_public_class_has_at_least_two_public_methods`
   (same)
-- `tests/test_package_boundaries.py::test_public_class_has_at_most_seven_public_methods`
+- `tests/test_package_boundaries.py::test_public_class_has_at_most_nine_public_methods`
   (same)
 
 Future tests to be added at stage 04 (do not pre-create; the
