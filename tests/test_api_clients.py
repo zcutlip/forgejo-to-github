@@ -606,8 +606,8 @@ def test_gh_request_sends_bearer_authorization_header() -> None:
     assert headers.get("X-GitHub-Api-Version") == "2022-11-28"
 
 
-def test_gh_request_403_with_remaining_zero_raises_rate_limit_error() -> None:
-    """403 with ``X-RateLimit-Remaining: 0`` must raise ``GitHubRateLimitError`` immediately."""
+def test_403_with_remaining_zero_retries_then_raises() -> None:
+    """A 403 with ``X-RateLimit-Remaining: 0`` is retried up to 3 total attempts, then raises."""
     transport = FakeTransport(
         responses=[
             FakeResponse(
@@ -616,14 +616,43 @@ def test_gh_request_403_with_remaining_zero_raises_rate_limit_error() -> None:
                 headers={
                     "X-RateLimit-Remaining": "0",
                     "X-RateLimit-Reset": "1700000000",
+                    "Retry-After": "2",
                 },
-            )
+            ),
+            FakeResponse(
+                status_code=403,
+                json_payload={"message": "API rate limit exceeded"},
+                headers={
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": "1700000000",
+                    "Retry-After": "2",
+                },
+            ),
+            FakeResponse(
+                status_code=403,
+                json_payload={"message": "API rate limit exceeded"},
+                headers={
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": "1700000000",
+                    "Retry-After": "2",
+                },
+            ),
         ]
     )
     client = _github_client(transport)
 
-    with pytest.raises(GitHubRateLimitError) as exc_info:
+    sleep_calls: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        sleep_calls.append(s)
+
+    with patch(
+        "forgejo_to_github.github.time.sleep", side_effect=fake_sleep
+    ), pytest.raises(GitHubRateLimitError) as exc_info:
         client.create_issue(title="t", body="b", labels=[])
 
     assert exc_info.value.reset == 1700000000
-    assert len(transport.calls) == 1
+    assert len(transport.calls) == 3
+    assert len(sleep_calls) == 2
+    for slept in sleep_calls:
+        assert 2.0 <= slept <= 3.0
