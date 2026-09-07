@@ -45,6 +45,7 @@ import requests
 
 from forgejo_to_github.codeberg import CodebergClient
 from forgejo_to_github.domain import Repository
+from forgejo_to_github.formatting import format_comment_body
 from forgejo_to_github.git import GitMirror
 from forgejo_to_github.github import GitHubClient
 from forgejo_to_github.migration import MigrationOrchestrator
@@ -77,17 +78,31 @@ class _FakeApi:
     dict payloads.
     """
 
-    def __init__(self, issues: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        issues: list[dict[str, Any]] | None = None,
+        comments_by_issue: dict[int, list[dict[str, Any]]] | None = None,
+    ) -> None:
         self.issues = list(issues or [])
         self.calls: list[tuple[str, ...]] = []
         self._fail_issue_numbers: set[int] = set()
         self._fail_comment_keys: set[tuple[int, int]] = set()
         self._github_to_source: dict[int, int] = {}
         self._comment_counters: dict[int, int] = {}
+        self.comments_by_issue: dict[int, list[dict[str, Any]]] = dict(
+            comments_by_issue or {}
+        )
+        self._fail_list_comments_numbers: set[int] = set()
 
     def list_issues(self) -> list[dict[str, Any]]:
         self.calls.append(("list_issues",))
         return list(self.issues)
+
+    def list_comments(self, issue_id: int) -> list[dict[str, Any]]:
+        self.calls.append(("list_comments", str(int(issue_id))))
+        if int(issue_id) in self._fail_list_comments_numbers:
+            raise RuntimeError(f"simulated list_comments failure for {issue_id}")
+        return list(self.comments_by_issue.get(int(issue_id), []))
 
     def create_issue(self, title: str, body: str, labels: list[str]) -> int:
         idx = len([c for c in self.calls if c[0] == "create_issue"])
@@ -120,6 +135,9 @@ class _FakeApi:
 
     def fail_on_create_comment(self, issue_number: int, comment_index: int) -> None:
         self._fail_comment_keys.add((int(issue_number), int(comment_index)))
+
+    def fail_on_list_comments(self, issue_number: int) -> None:
+        self._fail_list_comments_numbers.add(int(issue_number))
 
 
 class _FakeGit:
@@ -196,6 +214,9 @@ class _FakeReport:
         self, source_number: int, kind: str, message: str | None = None
     ) -> None:
         self.events.append(("issue_failed", str(source_number), kind, message))
+
+    def comment_skipped(self, source_number: int, reason: str) -> None:
+        self.events.append(("comment_skipped", str(source_number), reason))
 
     def git_phase_finished(self, status: str) -> None:
         self.events.append(("git_phase_finished", status))
@@ -1893,4 +1914,159 @@ def test_orchestrator_wraps_issue_body_with_attribution_block() -> None:
     assert "2024-05-06" in body, (
         "attribution block must contain the date part before T "
         f"(2024-05-06); got {body!r}"
+    )
+
+
+# Comment fidelity: fetch, attribution, skips (append-only)
+
+
+def test_orchestrator_fetches_comments_via_codeberg_client() -> None:
+    """Migrated comments come from ``list_comments``, not the payload field.
+
+    The issue payload carries a stale dummy comment while the Codeberg
+    seam is configured with the real comment. The orchestrator must
+    consult ``list_comments`` with the source issue number and post
+    the fetched body.
+    """
+    real_comment: dict[str, Any] = {
+        "type": "Comment",
+        "user": {"username": "alice"},
+        "created_at": "2024-01-02T10:30:00Z",
+        "body": "hello there",
+    }
+    issue = _issue(1, comments=1)
+    api = _FakeApi(issues=[issue], comments_by_issue={1: [real_comment]})
+    posted: list[str] = []
+    real_create_comment = api.create_comment
+
+    def _recording_create_comment(github_number: int, body: str) -> int:
+        posted.append(body)
+        return real_create_comment(github_number, body)
+
+    api.create_comment = _recording_create_comment  # type: ignore[method-assign]
+
+    orch, _fakes = _build(api=api, state=_FakeState(), report=_FakeReport())
+
+    orch.run()
+
+    assert ("list_comments", "1") in api.calls, (
+        "orchestrator must fetch comments via list_comments(1); "
+        f"recorded calls: {api.calls!r}"
+    )
+    assert any("hello there" in body for body in posted), (
+        "posted comment body must come from the list_comments return; "
+        f"posted={posted!r}"
+    )
+    assert not any("comment 0 for 1" in body for body in posted), (
+        "stale payload comments must not be posted; "
+        f"posted={posted!r}"
+    )
+
+
+def test_orchestrator_wraps_comment_bodies_with_attribution() -> None:
+    """A fetched comment is posted wrapped with the attribution block."""
+    real_comment: dict[str, Any] = {
+        "type": "Comment",
+        "user": {"username": "alice"},
+        "created_at": "2024-01-02T10:30:00Z",
+        "body": "hello there",
+    }
+    api = _FakeApi(issues=[_issue(1)], comments_by_issue={1: [real_comment]})
+    captured: dict[str, Any] = {}
+    real_create_comment = api.create_comment
+
+    def _recording_create_comment(github_number: int, body: str) -> int:
+        captured["body"] = body
+        return real_create_comment(github_number, body)
+
+    api.create_comment = _recording_create_comment  # type: ignore[method-assign]
+
+    orch, _fakes = _build(api=api, state=_FakeState(), report=_FakeReport())
+
+    orch.run()
+
+    expected = format_comment_body("alice", "2024-01-02", "hello there")
+    assert captured.get("body") == expected, (
+        "body passed to create_comment must equal the format_comment_body "
+        f"output; got {captured.get('body')!r}, expected {expected!r}"
+    )
+
+
+def test_orchestrator_counts_skipped_malformed_comments() -> None:
+    """Two well-formed comments plus one malformed (empty body) comment."""
+    good_one: dict[str, Any] = {
+        "type": "Comment",
+        "user": {"username": "alice"},
+        "created_at": "2024-01-02T10:30:00Z",
+        "body": "hello there",
+    }
+    good_two: dict[str, Any] = {
+        "type": "Comment",
+        "user": {"username": "bob"},
+        "created_at": "2024-01-03T10:30:00Z",
+        "body": "second comment",
+    }
+    malformed: dict[str, Any] = {
+        "type": "Comment",
+        "user": {"username": "carol"},
+        "created_at": "2024-01-04T10:30:00Z",
+        "body": "",
+    }
+    issue = _issue(1, comments=2)
+    api = _FakeApi(
+        issues=[issue], comments_by_issue={1: [good_one, good_two, malformed]}
+    )
+
+    orch, _fakes = _build(api=api, state=_FakeState(), report=_FakeReport())
+
+    result = orch.run()
+
+    assert result.comments_attempted == 3, (
+        "malformed comments count as attempted; "
+        f"got {result.comments_attempted!r}"
+    )
+    assert result.comments_succeeded == 2, (
+        "only the two well-formed comments succeed; "
+        f"got {result.comments_succeeded!r}"
+    )
+
+
+def test_orchestrator_comment_fetch_failure_fails_issue() -> None:
+    """A ``list_comments`` failure fails the issue without checkpointing it."""
+    api = _FakeApi(issues=[_issue(1)])
+    api.fail_on_list_comments(1)
+    state = _FakeState()
+    report = _FakeReport()
+
+    orch, _fakes = _build(api=api, state=state, report=report)
+
+    result = orch.run()
+
+    assert any(f.step == "fetch_comments" for f in result.failures), (
+        "a comment fetch failure must record a failure with "
+        f'step "fetch_comments"; got {result.failures!r}'
+    )
+    assert any(
+        event[0] == "issue_failed" and event[2] == "comment"
+        for event in report.events
+        if len(event) >= 3
+    ), (
+        'reporter issue_failed event must carry kind "comment"; '
+        f"events={report.events!r}"
+    )
+    assert result.issues_failed == 1, (
+        f"the failed fetch must count one failed issue; got {result.issues_failed!r}"
+    )
+    assert not any(
+        event[0] == "issue_succeeded" and event[1] == "1"
+        for event in report.events
+    ), (
+        "no issue_succeeded may be reported for the fetch-failed issue; "
+        f"events={report.events!r}"
+    )
+    assert not any(
+        event[0] == "issue" and event[1] == 1 for event in state.events
+    ), (
+        "the fetch-failed issue must not be checkpointed; "
+        f"events={state.events!r}"
     )

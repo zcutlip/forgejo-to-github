@@ -278,11 +278,22 @@ def test_clone_failure_summary_marks_clone_status_distinctly():
 class _FakeCodeberg:
     """Source seam fake yielding one canned issue listing."""
 
-    def __init__(self, issues: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        issues: list[dict[str, Any]],
+        comments_by_issue: dict[int, list[dict[str, Any]]] | None = None,
+    ) -> None:
         self.issues = list(issues)
+        self.comments_by_issue: dict[int, list[dict[str, Any]]] = dict(
+            comments_by_issue or {}
+        )
 
     def list_issues(self) -> list[dict[str, Any]]:
         return list(self.issues)
+
+    def list_comments(self, issue_id: int) -> list[dict[str, Any]]:
+        """Serve configured comments per issue id (Slice D seam)."""
+        return list(self.comments_by_issue.get(int(issue_id), []))
 
 
 class _FakeGitHub:
@@ -295,6 +306,7 @@ class _FakeGitHub:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
+        self.comment_bodies: list[str] = []
         self.fail_create_issue = False
         self.fail_comment = False
         self.fail_close = False
@@ -319,6 +331,7 @@ class _FakeGitHub:
 
     def create_comment(self, github_number: int, body: str) -> int:
         self.calls.append(("create_comment", str(github_number)))
+        self.comment_bodies.append(body)
         if self.fail_comment:
             raise RuntimeError(f"simulated create_comment failure for {github_number}")
         return 1
@@ -367,15 +380,20 @@ class _RecordingReporter:
 
     def __init__(self) -> None:
         self.issue_failed_calls: list[tuple[Any, ...]] = []
+        self.issue_succeeded_calls: list[tuple[Any, ...]] = []
+        self.comment_skipped_calls: list[tuple[Any, ...]] = []
 
     def issue_started(self, source_number: int, total: int | None = None) -> None:
         return None
 
     def issue_succeeded(self, source_number: int, github_number: int) -> None:
-        return None
+        self.issue_succeeded_calls.append((source_number, github_number))
 
     def issue_failed(self, *args: Any) -> None:
         self.issue_failed_calls.append(tuple(args))
+
+    def comment_skipped(self, *args: Any) -> None:
+        self.comment_skipped_calls.append(tuple(args))
 
     def git_phase_finished(self, status: str) -> None:
         return None
@@ -485,3 +503,93 @@ def test_reporter_issue_failed_receives_distinct_kind_per_failure_step() -> None
 
     assert kinds == ["issue_create", "comment", "label_create", "close_failed"]
     assert len(set(kinds)) == 4, f"kinds must be distinct per step; got {kinds!r}"
+
+
+# Malformed-comment skip warnings (append-only) -----------------------------
+
+
+def test_orchestrator_skips_malformed_comment_with_warning() -> None:
+    """Malformed comments are skipped with a warning, not a failure.
+
+    Drives the real ``MigrationOrchestrator`` over one source issue whose
+    ``list_comments`` returns one well-formed comment and one malformed
+    comment (empty body). The orchestrator must report the skip via
+    ``reporter.comment_skipped(source_number, reason)`` with a non-empty
+    reason, must NOT report ``issue_failed`` for the issue, must still
+    post the well-formed comment, and must still record
+    ``issue_succeeded`` for the issue.
+
+    RED expectation: the S3 block currently iterates
+    ``issue.get("comments")`` from the issue payload — it never calls
+    ``list_comments`` and has no ``comment_skipped`` seam — so no skip is
+    recorded, nothing is posted, and the assertions below FAIL.
+    """
+    source_number = 5
+    codeberg = _FakeCodeberg(
+        [_slice_c_issue(source_number)],
+        comments_by_issue={
+            source_number: [
+                {"index": 0, "body": "a well-formed comment"},
+                {"index": 1, "body": ""},
+            ],
+        },
+    )
+    github = _FakeGitHub()
+    reporter = _RecordingReporter()
+    orch = MigrationOrchestrator(
+        repo=Repository(
+            source="owner/source", target="owner/target", skip_git=True, yes=True
+        ),
+        codeberg=codeberg,
+        github=github,
+        git=_FakeGit(),
+        state=_FakeState(),
+        reporter=reporter,
+    )
+    orch.run()
+
+    # The malformed (empty-body) comment is skipped with a warning.
+    assert len(reporter.comment_skipped_calls) == 1, (
+        "expected exactly one comment_skipped call, got "
+        f"{reporter.comment_skipped_calls!r}"
+    )
+    skipped = reporter.comment_skipped_calls[0]
+    assert len(skipped) == 2, (
+        "comment_skipped must be called with (source_number, reason); got "
+        f"{skipped!r}"
+    )
+    skipped_number, reason = skipped
+    assert int(skipped_number) == source_number, (
+        f"expected source_number {source_number}, got {skipped_number!r}"
+    )
+    assert isinstance(reason, str) and reason.strip() != "", (
+        f"expected a non-empty skip reason, got {reason!r}"
+    )
+
+    # A skip is not a failure.
+    assert reporter.issue_failed_calls == [], (
+        "malformed-comment skip must not report issue_failed; got "
+        f"{reporter.issue_failed_calls!r}"
+    )
+
+    # The well-formed comment was still posted with a non-empty wrapped body.
+    posted = [call for call in github.calls if call[0] == "create_comment"]
+    assert len(posted) == 1, (
+        f"expected exactly one posted comment, got {github.calls!r}"
+    )
+    assert len(github.comment_bodies) == 1
+    assert github.comment_bodies[0].strip() != "", (
+        "expected a non-empty wrapped comment body, got "
+        f"{github.comment_bodies!r}"
+    )
+    assert "a well-formed comment" in github.comment_bodies[0], (
+        "expected the well-formed comment text to be posted; got "
+        f"{github.comment_bodies!r}"
+    )
+
+    # The issue still succeeds.
+    succeeded_numbers = [int(call[0]) for call in reporter.issue_succeeded_calls]
+    assert source_number in succeeded_numbers, (
+        f"expected issue_succeeded for CB #{source_number}; got "
+        f"{reporter.issue_succeeded_calls!r}"
+    )
