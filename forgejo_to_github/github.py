@@ -398,12 +398,10 @@ class GitHubClient:
         :class:`GitHubRateLimitError` after the third rate-limited
         attempt.
 
-        Only HTTP 429 responses are retried. A 403 with
-        ``X-RateLimit-Remaining: 0`` (the GitHub primary-rate-limit
-        signal) is translated to :class:`GitHubRateLimitError`
-        immediately, without an internal retry. The orchestrator or
-        caller decides whether to retry after honoring the
-        ``X-RateLimit-Reset`` interval.
+        Both HTTP 429 and HTTP 403 with ``X-RateLimit-Remaining: 0``
+        (the GitHub primary-rate-limit signal) are retried up to
+        three times with the same delay source and jitter. Other
+        403 responses are returned for standard error translation.
         """
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
@@ -421,12 +419,16 @@ class GitHubClient:
                     )
                 ) from exc
 
-            status = getattr(response, "status_code", 0)
-            if status == 429:
+            if _is_rate_limit_response(response):
                 if attempt >= _MAX_ATTEMPTS:
                     raise self._rate_limit_error(response)
                 self._sleep_for_rate_limit(response)
                 continue
+
+            headers = getattr(response, "headers", None) or {}
+            remaining = _parse_int_header(headers, "X-RateLimit-Remaining")
+            if remaining is not None and remaining < 10:
+                time.sleep(2)
 
             return response
 
