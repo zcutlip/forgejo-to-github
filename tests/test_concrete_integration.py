@@ -445,6 +445,12 @@ def test_github_wiring_creates_issue_and_comment_with_concrete_signatures(
                 status_code=200,
                 json_payload={"name": "target", "open_issues_count": 0},
             ),
+            # ensure_label("bug"): GET 404 (missing) -> POST 201 (created).
+            FakeResponse(status_code=404, json_payload={"message": "Not Found"}),
+            FakeResponse(status_code=201, json_payload={"name": "bug"}),
+            # ensure_label("enhancement"): GET 404 (missing) -> POST 201 (created).
+            FakeResponse(status_code=404, json_payload={"message": "Not Found"}),
+            FakeResponse(status_code=201, json_payload={"name": "enhancement"}),
             FakeResponse(status_code=201, json_payload={"number": github_number}),
             FakeResponse(status_code=201, json_payload={"id": github_comment_id}),
         ]
@@ -492,7 +498,13 @@ def test_github_wiring_creates_issue_and_comment_with_concrete_signatures(
     assert len(posts) >= 2, (
         f"expected issue+comment POSTs, got {github_transport.calls!r}"
     )
-    issue_call = posts[0]
+    issue_posts = [
+        c for c in posts if c.url == "https://api.github.com/repos/owner/target/issues"
+    ]
+    assert len(issue_posts) == 1, (
+        f"expected exactly one issue-create POST, got {github_transport.calls!r}"
+    )
+    issue_call = issue_posts[0]
     assert issue_call.method == "POST"
     assert issue_call.url == "https://api.github.com/repos/owner/target/issues"
     assert isinstance(issue_call.json_body, dict), (
@@ -501,14 +513,36 @@ def test_github_wiring_creates_issue_and_comment_with_concrete_signatures(
     assert issue_call.json_body.get("title") == "Hello world", (
         f"title not forwarded: {issue_call.json_body!r}"
     )
-    assert issue_call.json_body.get("body") == "Issue body", (
-        f"body not forwarded: {issue_call.json_body!r}"
+    assert isinstance((body_sent := issue_call.json_body.get("body")), str), (
+        f"body not a string: {issue_call.json_body!r}"
+    )
+    assert body_sent.startswith("> **Migrated from Codeberg**"), (
+        f"body missing attribution header: {body_sent!r}"
+    )
+    assert "Issue body" in body_sent, f"original body text not preserved: {body_sent!r}"
+    assert "Original Issue #1" in body_sent, (
+        f"body missing source issue number: {body_sent!r}"
+    )
+    assert "https://codeberg.org/owner/source/issues/1" in body_sent, (
+        f"body missing source issue link: {body_sent!r}"
+    )
+    # Fixture issue carries no user/created_at, so the attribution block
+    # records an empty author handle and date.
+    assert "> **Author:** @ | **Date:** " in body_sent, (
+        f"body missing author/date attribution: {body_sent!r}"
     )
     assert issue_call.json_body.get("labels") == ["bug", "enhancement"], (
         f"labels not forwarded: {issue_call.json_body!r}"
     )
 
-    comment_call = posts[1]
+    comment_url = (
+        f"https://api.github.com/repos/owner/target/issues/{github_number}/comments"
+    )
+    comment_posts = [c for c in posts if c.url == comment_url]
+    assert len(comment_posts) == 1, (
+        f"expected exactly one comment POST to {comment_url}, got {github_transport.calls!r}"
+    )
+    comment_call = comment_posts[0]
     assert comment_call.method == "POST"
     assert (
         comment_call.url
@@ -518,6 +552,22 @@ def test_github_wiring_creates_issue_and_comment_with_concrete_signatures(
     )
     assert isinstance(comment_call.json_body, dict)
     assert comment_call.json_body.get("body") == "Nice comment"
+
+    # Label traffic (ensure_label GET + POST per fixture label) precedes issue create.
+    calls = github_transport.calls
+    issue_idx = next(
+        i
+        for i, c in enumerate(calls)
+        if c.method == "POST"
+        and c.url == "https://api.github.com/repos/owner/target/issues"
+    )
+    label_indices = [i for i, c in enumerate(calls) if "/labels" in c.url]
+    assert label_indices, (
+        f"expected ensure_label traffic before issue create, got {calls!r}"
+    )
+    assert max(label_indices) < issue_idx, (
+        f"label traffic must precede issue create: label indices {label_indices}, issue index {issue_idx}"
+    )
 
     # Also assert result counters reflect success (not failed due to signature)
     assert result.issues_attempted == 1, f"issues_attempted {result.issues_attempted!r}"

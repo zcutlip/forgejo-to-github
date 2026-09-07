@@ -167,7 +167,9 @@ class _NullReporter:
     def issue_succeeded(self, source_number: int, github_number: int) -> None:
         self.succeeded.append((int(source_number), int(github_number)))
 
-    def issue_failed(self, source_number: int, kind: str, message: str | None = None) -> None:
+    def issue_failed(
+        self, source_number: int, kind: str, message: str | None = None
+    ) -> None:
         self.failed.append((int(source_number), kind, message))
 
     def git_phase_finished(self, status: str) -> None:

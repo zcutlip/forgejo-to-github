@@ -192,7 +192,9 @@ class _FakeReport:
     def issue_succeeded(self, source_number: int, github_number: int) -> None:
         self.events.append(("issue_succeeded", str(source_number), str(github_number)))
 
-    def issue_failed(self, source_number: int, kind: str, message: str | None = None) -> None:
+    def issue_failed(
+        self, source_number: int, kind: str, message: str | None = None
+    ) -> None:
         self.events.append(("issue_failed", str(source_number), kind, message))
 
     def git_phase_finished(self, status: str) -> None:
@@ -1752,16 +1754,21 @@ def test_orchestrator_migrates_issues_in_creation_date_order() -> None:
         {"number": 3, "title": "middle", "created_at": "2024-02-01T10:00:00Z"},
     ]
     api = _FakeApi(issues=issues)
+    titles: list[str] = []
+    real_create_issue = api.create_issue
+
+    def _recording_create_issue(title: str, body: str, labels: list[str]) -> int:
+        titles.append(title)
+        return real_create_issue(title, body, labels)
+
+    api.create_issue = _recording_create_issue  # type: ignore[method-assign]
 
     orch, _fakes = _build(api=api, state=_FakeState(), report=_FakeReport())
 
     orch.run()
 
-    create_calls = [c for c in api.calls if c[0] == "create_issue"]
-    order = [c[1] for c in create_calls]
-    assert order == ["2", "3", "1"], (
-        "issues must be migrated in created_at ascending order; "
-        f"got {order!r}"
+    assert titles == ["oldest", "middle", "newest"], (
+        f"issues must be migrated in created_at ascending order; got {titles!r}"
     )
 
 
@@ -1834,9 +1841,7 @@ def test_orchestrator_uses_default_label_color_when_source_label_lacks_color() -
     api = _FakeApi(issues=[issue])
     ensured: list[tuple[str, str, str]] = []
 
-    def _recording_ensure_label(
-        name: str, color: str, description: str = ""
-    ) -> None:
+    def _recording_ensure_label(name: str, color: str, description: str = "") -> None:
         ensured.append((name, color, description))
         api.calls.append(("ensure_label", name))
 
@@ -1877,10 +1882,11 @@ def test_orchestrator_wraps_issue_body_with_attribution_block() -> None:
 
     body = captured.get("body", "")
     assert body.startswith("> **Migrated from Codeberg**"), (
-        "migrated body must start with the attribution block; "
-        f"got {body!r}"
+        f"migrated body must start with the attribution block; got {body!r}"
     )
-    assert "5" in body, f"attribution block must contain the issue index 5; got {body!r}"
+    assert "5" in body, (
+        f"attribution block must contain the issue index 5; got {body!r}"
+    )
     assert "alice" in body, (
         f"attribution block must contain the author handle alice; got {body!r}"
     )

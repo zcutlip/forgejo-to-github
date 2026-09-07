@@ -320,17 +320,13 @@ class _FakeGitHub:
     def create_comment(self, github_number: int, body: str) -> int:
         self.calls.append(("create_comment", str(github_number)))
         if self.fail_comment:
-            raise RuntimeError(
-                f"simulated create_comment failure for {github_number}"
-            )
+            raise RuntimeError(f"simulated create_comment failure for {github_number}")
         return 1
 
     def close_issue(self, issue_number: int) -> None:
         self.calls.append(("close_issue", str(issue_number)))
         if self.fail_close:
-            raise RuntimeError(
-                f"simulated close_issue failure for {issue_number}"
-            )
+            raise RuntimeError(f"simulated close_issue failure for {issue_number}")
 
     def ensure_label(self, name: str, color: str, description: str = "") -> None:
         self.calls.append(("ensure_label", str(name)))
@@ -372,14 +368,10 @@ class _RecordingReporter:
     def __init__(self) -> None:
         self.issue_failed_calls: list[tuple[Any, ...]] = []
 
-    def issue_started(
-        self, source_number: int, total: int | None = None
-    ) -> None:
+    def issue_started(self, source_number: int, total: int | None = None) -> None:
         return None
 
-    def issue_succeeded(
-        self, source_number: int, github_number: int
-    ) -> None:
+    def issue_succeeded(self, source_number: int, github_number: int) -> None:
         return None
 
     def issue_failed(self, *args: Any) -> None:
@@ -462,9 +454,7 @@ def test_reporter_issue_failed_receives_distinct_kind_per_failure_step() -> None
     # 4. close failure: the source issue is closed and ``close_issue`` raises.
     close_github = _FakeGitHub()
     close_github.fail_close = True
-    close_calls = _drive_slice_c_issue(
-        _slice_c_issue(4, state="closed"), close_github
-    )
+    close_calls = _drive_slice_c_issue(_slice_c_issue(4, state="closed"), close_github)
 
     kinds: list[str] = []
     for calls, source_number, expected_kind in (
@@ -486,12 +476,10 @@ def test_reporter_issue_failed_receives_distinct_kind_per_failure_step() -> None
             f"expected source_number {source_number}, got {number!r}"
         )
         assert kind == expected_kind, (
-            f"expected kind {expected_kind!r}, got {kind!r} "
-            f"for CB #{source_number}"
+            f"expected kind {expected_kind!r}, got {kind!r} for CB #{source_number}"
         )
         assert isinstance(message, str) and message.strip() != "", (
-            f"expected a non-empty message for CB #{source_number}, "
-            f"got {message!r}"
+            f"expected a non-empty message for CB #{source_number}, got {message!r}"
         )
         kinds.append(kind)
 
