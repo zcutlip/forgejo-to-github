@@ -522,6 +522,15 @@ verification outcomes, and any spec deviation (e.g., new
    (which codified 403-raises-immediately), with user approval.
 6. Augment `test_rate_limit_429_is_retried_then_terminates_with_rate_limit_error`
    to assert additive jitter, with user approval.
+7. Addendum (discovered during Slice B GREEN, user-approved): a second
+   stage-02 test pins the same regressive contract —
+   `tests/test_api_clients.py::test_gh_request_403_with_remaining_zero_raises_rate_limit_error`
+   (single scripted 403, asserts immediate `GitHubRateLimitError` with
+   one transport call). Amended to the same retry-both contract as the
+   re-locked sibling and renamed to
+   `test_403_with_remaining_zero_retries_then_raises` (the legacy
+   `gh_request` name no longer exists). Recorded here so this ledger
+   remains the complete record of Slice B test amendments.
 
 **Out of scope for Slice B:** the unbounded reset sleep (#13, backlog)
 and pagination safeguard (#14, backlog). Those are genuine pre-existing
