@@ -407,7 +407,27 @@ class MigrationOrchestrator:
         falls back to the legacy ``run_clone``/``run_push`` seam used
         only by those fakes. The fallback is narrow and documented
         here; no broad dual-API complexity is introduced.
+
+        Resume
+        ------
+        When the loaded checkpoint already records a successful push
+        (concrete ``StateStore`` path with ``git_pushed`` truthy), the
+        entire Git phase is skipped — no clone, no branch push, no tag
+        push — and ``result.git`` keeps the skipped map. Legacy seams
+        without ``load()`` always run the phase.
         """
+        # Resume: a previous run already pushed the mirror. Skip the
+        # entire Git phase; issue migration still proceeds. Consulted
+        # through the same channel as the issue resume checks — no new
+        # state-API surface. Legacy seams (no load()) always run.
+        self._ensure_concrete_state_loaded()
+        if self._is_concrete_state_store() and bool(self._concrete_git_pushed):
+            result.git["clone"] = "skipped"
+            result.git["push"] = "skipped"
+            result.clone_status = "skipped"
+            result.push_status = "skipped"
+            return
+
         # Concrete GitMirror path — preferred. Detected by presence of
         # callable ``clone`` so the concrete lifecycle is never hidden
         # when a real GitMirror is injected.
@@ -444,6 +464,7 @@ class MigrationOrchestrator:
                     result.git["push"] = "ok"
                     result.push_status = "ok"
                     self._safe_git_phase_finished("ok")
+                    self._mark_git_pushed()
             finally:
                 # cleanup runs even after push failures, after successful clone
                 cleanup_fn = getattr(self.git, "cleanup", None)
@@ -472,6 +493,37 @@ class MigrationOrchestrator:
         result.git["push"] = "ok"
         result.push_status = "ok"
         self._safe_git_phase_finished("ok")
+        self._mark_git_pushed()
+
+    def _mark_git_pushed(self) -> None:
+        """Checkpoint a successful Git push via the concrete state path.
+
+        Sets the orchestrator-owned ``git_pushed`` flag and persists it
+        through the existing ``StateStore.save(repo_created, git_pushed,
+        migrated)`` channel, preserving the currently known
+        ``repo_created`` and ``migrated`` values. Best-effort:
+        persistence errors are swallowed, mirroring
+        :meth:`_safe_record_issue`. This runs at the end of the Git
+        phase, so the checkpoint lands before issue migration begins.
+        On push failure this is never called: ``git_pushed`` stays
+        falsy and a later resume retries the Git phase. Legacy seams
+        without ``load()``/``save()`` are untouched.
+        """
+        if not self._is_concrete_state_store():
+            return
+        self._ensure_concrete_state_loaded()
+        self._concrete_git_pushed = True
+        save_fn = getattr(self.state, "save", None)
+        if not callable(save_fn):
+            return
+        try:
+            save_fn(
+                self._concrete_repo_created,
+                self._concrete_git_pushed,
+                dict(self._concrete_migrated),
+            )
+        except Exception:  # noqa: BLE001 — state seam is best-effort
+            return
 
     def _migrate_issues(self, result: MigrationResult) -> None:
         """Enumerate source issues and migrate each one.
@@ -518,14 +570,16 @@ class MigrationOrchestrator:
         S5. ``state.record_issue`` and ``reporter.issue_succeeded``.
             Increment ``issues_succeeded``.
         """
-        result.issues_attempted += 1
-
         # Resume: skip already-migrated issues. The state seam's
         # ``already_migrated`` is consulted before any work is done
         # for the issue, so even an in-progress run is safe to
-        # interrupt and resume.
+        # interrupt and resume. A resume-skipped issue is not an
+        # attempt: it is neither counted nor reported as started.
         if self._already_migrated(source_number):
+            self._safe_issue_skipped(source_number)
             return
+
+        result.issues_attempted += 1
 
         # S1: report progress.
         self._safe_issue_started(source_number)
@@ -828,6 +882,15 @@ class MigrationOrchestrator:
             return
         try:
             failed(source_number, kind, message)
+        except Exception:  # noqa: BLE001 — reporter is best-effort
+            return
+
+    def _safe_issue_skipped(self, source_number: int) -> None:
+        skipped = getattr(self.reporter, "issue_skipped", None)
+        if not callable(skipped):
+            return
+        try:
+            skipped(source_number)
         except Exception:  # noqa: BLE001 — reporter is best-effort
             return
 

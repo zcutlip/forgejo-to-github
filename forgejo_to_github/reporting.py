@@ -108,6 +108,10 @@ class Reporter:
         """Emit a malformed-comment skip warning (not a failure)."""
         self._error.write(f"SKIPPED [comment] CB #{source_number}: {reason}")
 
+    def issue_skipped(self, source_number: int) -> None:
+        """Emit a resume-skip notice for an already-migrated issue."""
+        self._output.write(f"SKIP CB #{source_number}: already migrated")
+
     def git_phase_finished(self, status: str) -> None:
         """Emit a one-line summary of the Git phase."""
         line = f"Git: {status}"
