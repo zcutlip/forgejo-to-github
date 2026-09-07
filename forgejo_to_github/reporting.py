@@ -96,18 +96,13 @@ class Reporter:
     ) -> None:
         """Emit a failure line for one issue.
 
-        The orchestrator's current seam calls this as
-        ``issue_failed(source_number, message)`` (two arguments). The spec
-        defines ``issue_failed(source_number, kind, message)``. This
-        implementation accepts both shapes: when only two positional
-        arguments are supplied the ``kind`` is treated as the message
-        and a generic kind is used.
+        Three-argument contract: ``source_number`` is the source issue
+        number, ``kind`` is the failure step (one of ``"issue_create"``,
+        ``"comment"``, ``"label_create"``, ``"close_failed"``), and
+        ``message`` is the error text.
         """
-        if message is None:
-            # Two-arg call: kind is actually the message.
-            message = kind
-            kind = "issue_create"
-        self._error.write(f"FAILED [{kind}] CB #{source_number}: {message}")
+        text = "" if message is None else message
+        self._error.write(f"FAILED [{kind}] CB #{source_number}: {text}")
 
     def git_phase_finished(self, status: str) -> None:
         """Emit a one-line summary of the Git phase."""

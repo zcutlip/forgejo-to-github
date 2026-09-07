@@ -79,6 +79,7 @@ from forgejo_to_github.domain import (
     MigrationResult,
     Repository,
 )
+from forgejo_to_github.formatting import format_issue_body
 
 # Default color substituted by the orchestrator when a source label
 # lacks one. The GitHub client does not default colors; this constant
@@ -480,6 +481,8 @@ class MigrationOrchestrator:
         through :meth:`_migrate_one_issue`, which never raises.
         """
         issues = self._list_issues()
+        # Slice C fidelity: migrate oldest-first by creation date.
+        issues = sorted(issues, key=lambda i: str(i.get("created_at") or ""))
         for issue in issues:
             try:
                 source_number = int(issue["number"])
@@ -530,12 +533,60 @@ class MigrationOrchestrator:
         # S2: create the issue via concrete GitHubClient API.
         try:
             title = str(issue.get("title", ""))
-            body = str(issue.get("body", ""))
+            # Slice C fidelity: map Codeberg label payloads to plain
+            # names (dicts contribute ``lbl["name"]``; non-dicts are
+            # stringified as-is; entries without a usable name are
+            # skipped) and ensure each label before creating the issue.
             labels_raw = issue.get("labels")
+            labels_arg: list[str] = []
+            label_defs: list[tuple[str, str, str]] = []
             if labels_raw:
-                labels_arg: list[str] = [str(lbl) for lbl in list(labels_raw)]
-            else:
-                labels_arg = []
+                for lbl in list(labels_raw):
+                    if isinstance(lbl, dict):
+                        name = lbl.get("name")
+                        if not name:
+                            continue
+                        label_name = str(name)
+                        color_raw = lbl.get("color")
+                        color = str(color_raw) if color_raw else DEFAULT_LABEL_COLOR
+                        description = str(lbl.get("description") or "")
+                    else:
+                        label_name = str(lbl)
+                        if not label_name:
+                            continue
+                        color = DEFAULT_LABEL_COLOR
+                        description = ""
+                    labels_arg.append(label_name)
+                    label_defs.append((label_name, color, description))
+            ensure_label = getattr(self.github, "ensure_label", None)
+            if callable(ensure_label):
+                for label_name, color, description in label_defs:
+                    try:
+                        ensure_label(label_name, color, description)
+                    except Exception as exc:  # noqa: BLE001 — label ensure failure
+                        message = str(exc) or exc.__class__.__name__
+                        result.failures.append(
+                            IssueFailure(
+                                kind="label_create",
+                                source_number=source_number,
+                                message=message,
+                                step="label",
+                            )
+                        )
+                        self._safe_issue_failed(
+                            source_number, "label_create", message
+                        )
+            # Slice C fidelity: wrap the body with the migration
+            # attribution block. Label failures above never block issue
+            # creation.
+            source = str(getattr(self.repo, "source", ""))
+            user = issue.get("user")
+            author = str(user.get("login", "")) if isinstance(user, dict) else ""
+            created_at = str(issue.get("created_at") or "")
+            date = created_at.split("T")[0]
+            body = format_issue_body(
+                source, source_number, author, date, issue.get("body")
+            )
             github_number = int(self.github.create_issue(title, body, labels_arg))
             time.sleep(_ISSUE_MUTATION_PAUSE_SECONDS)
         except Exception as exc:  # noqa: BLE001 — issue create failure
@@ -549,7 +600,7 @@ class MigrationOrchestrator:
                     step="create",
                 )
             )
-            self._safe_issue_failed(source_number, message)
+            self._safe_issue_failed(source_number, "issue_create", message)
             return
 
         # S3: post comments. Per-comment failures do not abort the
@@ -577,6 +628,7 @@ class MigrationOrchestrator:
                         step="comment",
                     )
                 )
+                self._safe_issue_failed(source_number, "comment", message)
                 continue
 
             result.comments_succeeded += 1
@@ -593,14 +645,16 @@ class MigrationOrchestrator:
                     close(github_number)
                     time.sleep(_ISSUE_MUTATION_PAUSE_SECONDS)
                 except Exception as exc:  # noqa: BLE001 — close warning
+                    message = str(exc) or exc.__class__.__name__
                     result.failures.append(
                         IssueFailure(
                             kind="close_failed",
                             source_number=source_number,
-                            message=str(exc) or exc.__class__.__name__,
+                            message=message,
                             step="close",
                         )
                     )
+                    self._safe_issue_failed(source_number, "close_failed", message)
 
         # S5: checkpoint and report success.
         self._safe_record_issue(source_number, github_number)
@@ -741,12 +795,12 @@ class MigrationOrchestrator:
         except Exception:  # noqa: BLE001 — reporter is best-effort
             return
 
-    def _safe_issue_failed(self, source_number: int, reason: str) -> None:
+    def _safe_issue_failed(self, source_number: int, kind: str, message: str) -> None:
         failed = getattr(self.reporter, "issue_failed", None)
         if not callable(failed):
             return
         try:
-            failed(source_number, reason)
+            failed(source_number, kind, message)
         except Exception:  # noqa: BLE001 — reporter is best-effort
             return
 
