@@ -79,7 +79,7 @@ from forgejo_to_github.domain import (
     MigrationResult,
     Repository,
 )
-from forgejo_to_github.formatting import format_issue_body
+from forgejo_to_github.formatting import format_comment_body, format_issue_body
 
 # Default color substituted by the orchestrator when a source label
 # lacks one. The GitHub client does not default colors; this constant
@@ -601,19 +601,48 @@ class MigrationOrchestrator:
             self._safe_issue_failed(source_number, "issue_create", message)
             return
 
-        # S3: post comments. Per-comment failures do not abort the
+        # S3: post comments. Slice D fidelity: comments are fetched
+        # unconditionally via ``list_comments`` for every issue (the
+        # issue payload's ``comments`` field is stale), then filtered
+        # to the real API shape. Per-comment failures do not abort the
         # issue; the checkpoint still advances to S5 because the
         # issue itself was created successfully.
-        for comment in issue.get("comments") or []:
-            try:
-                comment_index = int(comment.get("index", 0))
-            except (TypeError, ValueError):
-                # Skip malformed comments rather than failing the
-                # whole issue; the issue is still migrated.
-                continue
+        try:
+            comments = self.codeberg.list_comments(issue_id=source_number)
+        except Exception as exc:  # noqa: BLE001 — comment fetch failure
+            result.issues_failed += 1
+            message = str(exc) or exc.__class__.__name__
+            result.failures.append(
+                IssueFailure(
+                    kind="comment",
+                    source_number=source_number,
+                    message=message,
+                    step="fetch_comments",
+                )
+            )
+            self._safe_issue_failed(source_number, "comment", message)
+            return
+
+        for comment_index, comment in enumerate(comments or []):
             result.comments_attempted += 1
+            ctype = comment.get("type")
+            author = (comment.get("user") or {}).get("username")
+            body = comment.get("body")
+            if ctype is not None and ctype != "Comment":
+                self._safe_comment_skipped(source_number, "non-Comment type")
+                continue
+            if not body:
+                self._safe_comment_skipped(source_number, "empty or missing body")
+                continue
+            if not author:
+                self._safe_comment_skipped(source_number, "missing author")
+                continue
             try:
-                comment_body = str(comment.get("body", ""))
+                comment_body = format_comment_body(
+                    author,
+                    str(comment.get("created_at") or "").split("T")[0],
+                    body,
+                )
                 response = self.github.create_comment(github_number, comment_body)
             except Exception as exc:  # noqa: BLE001 — comment failure
                 result.comments_failed += 1
@@ -799,6 +828,15 @@ class MigrationOrchestrator:
             return
         try:
             failed(source_number, kind, message)
+        except Exception:  # noqa: BLE001 — reporter is best-effort
+            return
+
+    def _safe_comment_skipped(self, source_number: int, reason: str) -> None:
+        skipped = getattr(self.reporter, "comment_skipped", None)
+        if not callable(skipped):
+            return
+        try:
+            skipped(source_number, reason)
         except Exception:  # noqa: BLE001 — reporter is best-effort
             return
 

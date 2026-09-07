@@ -104,6 +104,10 @@ class Reporter:
         text = "" if message is None else message
         self._error.write(f"FAILED [{kind}] CB #{source_number}: {text}")
 
+    def comment_skipped(self, source_number: int, reason: str) -> None:
+        """Emit a malformed-comment skip warning (not a failure)."""
+        self._error.write(f"SKIPPED [comment] CB #{source_number}: {reason}")
+
     def git_phase_finished(self, status: str) -> None:
         """Emit a one-line summary of the Git phase."""
         line = f"Git: {status}"
