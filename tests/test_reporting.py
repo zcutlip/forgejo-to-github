@@ -360,8 +360,11 @@ class _FakeGit:
 class _FakeState:
     """Checkpoint seam fake with in-memory ``already_migrated`` support."""
 
-    def __init__(self) -> None:
+    def __init__(self, migrated: dict[int, int] | None = None) -> None:
         self.recorded: list[tuple[int, int]] = []
+        if migrated:
+            for src, dst in dict(migrated).items():
+                self.recorded.append((int(src), int(dst)))
 
     def already_migrated(self, source_number: int) -> bool:
         return any(src == int(source_number) for src, _ in self.recorded)
@@ -382,9 +385,14 @@ class _RecordingReporter:
         self.issue_failed_calls: list[tuple[Any, ...]] = []
         self.issue_succeeded_calls: list[tuple[Any, ...]] = []
         self.comment_skipped_calls: list[tuple[Any, ...]] = []
+        self.issue_started_calls: list[tuple[Any, ...]] = []
+        self.issue_skipped_calls: list[tuple[Any, ...]] = []
 
     def issue_started(self, source_number: int, total: int | None = None) -> None:
-        return None
+        if total is None:
+            self.issue_started_calls.append((source_number,))
+        else:
+            self.issue_started_calls.append((source_number, total))
 
     def issue_succeeded(self, source_number: int, github_number: int) -> None:
         self.issue_succeeded_calls.append((source_number, github_number))
@@ -394,6 +402,9 @@ class _RecordingReporter:
 
     def comment_skipped(self, *args: Any) -> None:
         self.comment_skipped_calls.append(tuple(args))
+
+    def issue_skipped(self, source_number: int) -> None:
+        self.issue_skipped_calls.append((source_number,))
 
     def git_phase_finished(self, status: str) -> None:
         return None
@@ -612,4 +623,77 @@ def test_orchestrator_skips_malformed_comment_with_warning() -> None:
     assert source_number in succeeded_numbers, (
         f"expected issue_succeeded for CB #{source_number}; got "
         f"{reporter.issue_succeeded_calls!r}"
+    )
+
+
+# Resume-skip reporting (append-only)
+
+
+def test_reporter_emits_issue_skipped_message_for_resumed_issue() -> None:
+    """Resumed issues are reported via ``issue_skipped``, not re-migrated.
+
+    Two parts in one test:
+
+    (a) Routing: the real ``Reporter.issue_skipped(5)`` writes exactly
+    one stdout line containing ``SKIP CB #5`` and ``already migrated``,
+    and nothing to stderr.
+
+    (b) Seam usage: driving the real ``MigrationOrchestrator`` over two
+    source issues with issue 1 already checkpointed calls
+    ``issue_skipped`` exactly once with ``(1,)``, never calls
+    ``issue_started`` for issue 1, and still migrates issue 2 normally.
+
+    RED expectation: (a) FAILS with AttributeError (the real Reporter
+    has no ``issue_skipped`` yet); (b) FAILS because the orchestrator
+    never calls ``issue_skipped``.
+    """
+    # (a) Routing: real Reporter with recording sinks.
+    out = _Sink()
+    err = _Sink()
+    reporter = Reporter(output=out, error_output=err)
+    reporter.issue_skipped(5)
+    assert len(out.lines) == 1, (
+        f"expected exactly one stdout line for issue_skipped, got {out.lines!r}"
+    )
+    line = out.lines[0]
+    assert "SKIP CB #5" in line, (
+        f"expected 'SKIP CB #5' in skipped line; got {line!r}"
+    )
+    assert "already migrated" in line, (
+        f"expected 'already migrated' in skipped line; got {line!r}"
+    )
+    assert err.lines == [], (
+        f"expected nothing on stderr for issue_skipped; got {err.lines!r}"
+    )
+
+    # (b) Seam usage: real orchestrator with issue 1 already migrated.
+    codeberg = _FakeCodeberg([_slice_c_issue(1), _slice_c_issue(2)])
+    github = _FakeGitHub()
+    recording = _RecordingReporter()
+    orch = MigrationOrchestrator(
+        repo=Repository(
+            source="owner/source", target="owner/target", skip_git=True, yes=True
+        ),
+        codeberg=codeberg,
+        github=github,
+        git=_FakeGit(),
+        state=_FakeState(migrated={1: 101}),
+        reporter=recording,
+    )
+    orch.run()
+
+    assert recording.issue_skipped_calls == [(1,)], (
+        "expected exactly one issue_skipped call with (1,); got "
+        f"{recording.issue_skipped_calls!r}"
+    )
+    assert all(
+        int(call[0]) != 1 for call in recording.issue_started_calls
+    ), (
+        "issue_started must NOT be called for resumed issue 1; got "
+        f"{recording.issue_started_calls!r}"
+    )
+    succeeded_numbers = [int(call[0]) for call in recording.issue_succeeded_calls]
+    assert 2 in succeeded_numbers, (
+        f"expected issue_succeeded for CB #2; got "
+        f"{recording.issue_succeeded_calls!r}"
     )

@@ -174,8 +174,19 @@ class _FakeState:
     end-of-issue checkpoint; ``record_comment`` is per-comment.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, migrated: dict[int, int] | None = None) -> None:
         self.events: list[tuple[str, int, int | None]] = []
+        # Prepopulated resume checkpoint: each entry seeds an ("issue",
+        # ...) event so already_migrated() reports it without any run
+        # having occurred.
+        for source_number, github_number in dict(migrated or {}).items():
+            self.events.append(("issue", int(source_number), int(github_number)))
+        # Record-only StateStore.save seam: the (repo_created,
+        # git_pushed, migrated) args of each save() call. Deliberately
+        # NO load() method: without load, the orchestrator keeps the
+        # legacy already_migrated/record_issue path (see
+        # _is_concrete_state_store), so existing tests are unaffected.
+        self.save_calls: list[tuple[bool, bool, dict[int, int]]] = []
 
     def record_issue(self, source_number: int, github_number: int) -> None:
         self.events.append(("issue", int(source_number), int(github_number)))
@@ -190,6 +201,14 @@ class _FakeState:
             if kind == "issue" and src == source_number:
                 return True
         return False
+
+    def save(
+        self, repo_created: bool, git_pushed: bool, migrated: dict[int, int]
+    ) -> None:
+        """Record-only ``StateStore.save`` seam (never persists)."""
+        self.save_calls.append(
+            (bool(repo_created), bool(git_pushed), dict(migrated))
+        )
 
 
 class _FakeReport:
@@ -218,6 +237,9 @@ class _FakeReport:
     def comment_skipped(self, source_number: int, reason: str) -> None:
         self.events.append(("comment_skipped", str(source_number), reason))
 
+    def issue_skipped(self, source_number: int) -> None:
+        self.events.append(("issue_skipped", str(source_number)))
+
     def git_phase_finished(self, status: str) -> None:
         self.events.append(("git_phase_finished", status))
 
@@ -242,7 +264,7 @@ def _build(
     *,
     issues: list[dict[str, Any]] | None = None,
     git: _FakeGit | None = None,
-    state: _FakeState | None = None,
+    state: Any | None = None,
     api: _FakeApi | None = None,
     report: _FakeReport | None = None,
 ) -> tuple[MigrationOrchestrator, dict[str, Any]]:
@@ -2082,4 +2104,235 @@ def test_orchestrator_comment_fetch_failure_fails_issue() -> None:
     ), (
         "the fetch-failed issue must not be checkpointed; "
         f"events={state.events!r}"
+    )
+
+
+# ===========================================================================
+# Resume truthfulness: attempted counter, git_pushed persistence (append-only)
+# ===========================================================================
+#
+# Contract (audit finding #10 and the Git-phase resume gap): a resumed
+# (already-migrated) issue is not an attempt, and the Git phase is
+# resume-aware — a successful push is checkpointed via
+# ``StateStore.save(git_pushed=True)`` and a resumed run whose loaded
+# state has ``git_pushed=True`` skips clone/push entirely, while a run
+# whose push failed retries the Git phase on resume.
+#
+# RED-stage expectation: test 1 fails (issues_attempted counts the
+# resumed issue); test 2 fails on both parts (the orchestrator never
+# sets git_pushed and the Git phase ignores the loaded flag); test 3
+# is an intentionally-green guard (both assertions hold against
+# current code — the first because git_pushed is never set True for
+# any reason, the second because the Git phase always re-runs).
+
+
+class _PersistingSpyStateStore(StateStore):
+    """Recording StateStore that delegates to the real write path.
+
+    Unlike ``_SaveSpyStateStore`` (record-only), this spy persists
+    every ``save()`` to disk so a second orchestrator instance can
+    resume from the file the first run wrote — simulating a process
+    restart. ``save_calls`` records the full ``(repo_created,
+    git_pushed, migrated)`` args of each call.
+    """
+
+    def __init__(self, state_path: Path) -> None:
+        super().__init__(state_path, "owner/source", "owner/target")
+        self.save_calls: list[tuple[bool, bool, dict[int, int]]] = []
+
+    def save(
+        self,
+        repo_created: bool,
+        git_pushed: bool,
+        migrated: dict[int, int],
+    ) -> None:
+        self.save_calls.append(
+            (bool(repo_created), bool(git_pushed), dict(migrated))
+        )
+        super().save(repo_created, git_pushed, migrated)
+
+
+def test_issues_attempted_excludes_resumed_issues() -> None:
+    """A resume-skipped issue must not count toward issues_attempted.
+
+    The checkpoint is prepopulated with issue 1 already migrated; two
+    issues run. Only issue 2 may count as attempted, and no
+    ``create_issue`` may fire for issue 1.
+
+    RED: ``_migrate_one_issue`` increments ``issues_attempted`` BEFORE
+    the resume guard, so the count is 2 instead of 1.
+    """
+    api = _FakeApi(issues=[_issue(1, title="first"), _issue(2, title="second")])
+    created_titles: list[str] = []
+    real_create_issue = api.create_issue
+
+    def _recording_create_issue(title: str, body: str, labels: list[str]) -> int:
+        created_titles.append(title)
+        return real_create_issue(title, body, labels)
+
+    api.create_issue = _recording_create_issue  # type: ignore[method-assign]
+    state = _FakeState(migrated={1: 101})
+
+    orch, _fakes = _build(api=api, state=state, report=_FakeReport())
+
+    result = orch.run()
+
+    # NOTE: _FakeApi.create_issue derives its recorded source number
+    # from a call index, not the payload, so the raw
+    # ("create_issue", "1") tuple is meaningless when an earlier issue
+    # is resume-skipped. Titles identify which issue was created.
+    assert "first" not in created_titles, (
+        "no create_issue may fire for the already-migrated issue 1; "
+        f"created titles={created_titles!r}"
+    )
+    assert "second" in created_titles, (
+        "the unmigrated issue 2 must still be created; "
+        f"created titles={created_titles!r}"
+    )
+    assert result.issues_attempted == 1, (
+        "a resume-skipped issue is not an attempt; only issue 2 may "
+        f"count; got issues_attempted={result.issues_attempted!r}"
+    )
+
+
+def test_state_records_git_pushed_after_successful_push_and_skips_on_resume(
+    tmp_path: Path,
+) -> None:
+    """A successful push checkpoints git_pushed; resume skips the Git phase.
+
+    Part (a): a fresh run whose push succeeds must record
+    ``git_pushed=True`` in a ``save()`` call. Part (b): a second
+    orchestrator instance resumed from the persisted file must skip
+    the Git phase entirely (no clone, no push) while still migrating
+    remaining issues.
+
+    RED: part (a) fails — the orchestrator never sets git_pushed, so
+    every save() records False. Part (b) fails — the Git phase never
+    consults the loaded git_pushed flag, so clone/push re-run.
+    """
+    state_path = tmp_path / "state.json"
+
+    # Part (a): fresh run, push succeeds.
+    store_a = _PersistingSpyStateStore(state_path)
+    git_a = _FakeGit()
+    orch_a, _fakes_a = _build(
+        api=_FakeApi(issues=[_issue(1, title="first")]),
+        git=git_a,
+        state=store_a,
+        report=_FakeReport(),
+    )
+    orch_a.run()
+    pushed_recorded = any(git_pushed for _, git_pushed, _ in store_a.save_calls)
+
+    # Part (b): second instance resumes from the persisted file with a
+    # fresh Git seam and one additional unmigrated issue.
+    store_b = _PersistingSpyStateStore(state_path)
+    git_b = _FakeGit()
+    api_b = _FakeApi(issues=[_issue(1, title="first"), _issue(2, title="second")])
+    created_titles_b: list[str] = []
+    real_create_b = api_b.create_issue
+
+    def _recording_create_b(title: str, body: str, labels: list[str]) -> int:
+        created_titles_b.append(title)
+        return real_create_b(title, body, labels)
+
+    api_b.create_issue = _recording_create_b  # type: ignore[method-assign]
+    orch_b, _fakes_b = _build(
+        api=api_b, git=git_b, state=store_b, report=_FakeReport()
+    )
+    result_b = orch_b.run()
+    git_skipped = not git_b.clone_called and not git_b.push_called
+    remaining_migrated = (
+        "second" in created_titles_b
+        and "first" not in created_titles_b
+        and result_b.issues_succeeded == 1
+    )
+
+    # Collect every part before asserting so one failure message names
+    # exactly which part(s) fail against current code.
+    failures: list[str] = []
+    if not store_a.save_calls:
+        failures.append("(a) no save() call was recorded at all")
+    elif not pushed_recorded:
+        failures.append(
+            "(a) no save() call recorded git_pushed=True; "
+            f"save_calls={store_a.save_calls!r}"
+        )
+    if not git_skipped:
+        failures.append(
+            "(b) resumed run with persisted git_pushed must skip the "
+            "Git phase; "
+            f"clone_called={git_b.clone_called!r}, "
+            f"push_called={git_b.push_called!r}"
+        )
+    if not remaining_migrated:
+        failures.append(
+            "(b) resumed run must still migrate remaining issues "
+            "(issue 2 only); "
+            f"created titles={created_titles_b!r}, "
+            f"issues_succeeded={result_b.issues_succeeded!r}"
+        )
+    assert not failures, (
+        "resume truthfulness failures:\n" + "\n".join(failures)
+    )
+
+
+def test_state_does_not_record_git_pushed_when_push_fails(tmp_path: Path) -> None:
+    """A failed push checkpoints falsy git_pushed; resume retries Git.
+
+    Run with an injected push failure: every recorded ``save()`` must
+    carry a falsy ``git_pushed``, and a subsequent resume run from the
+    persisted file must run the Git phase again.
+
+    GREEN-guard note: against current code the first assertion holds
+    only because the orchestrator never sets git_pushed True for any
+    reason (success and failure are indistinguishable in the
+    checkpoint) — not because the failure actively clears it. The
+    second assertion holds genuinely: the Git phase always re-runs.
+    Neither assertion is weakened by that; the GREEN implementation
+    must keep both holding for the right reason.
+    """
+    state_path = tmp_path / "state.json"
+    store = _PersistingSpyStateStore(state_path)
+    git = _FakeGit()
+    git.push_error = RuntimeError("simulated push failure")
+
+    orch, _fakes = _build(
+        api=_FakeApi(issues=[_issue(1), _issue(2)]),
+        git=git,
+        state=store,
+        report=_FakeReport(),
+    )
+
+    result = orch.run()
+
+    # The push was attempted, failed non-fatally, and issue migration
+    # still proceeded to per-issue checkpoints.
+    assert git.push_called is True
+    assert result.push_status == "failed"
+    assert store.save_calls, (
+        "expected per-issue save() checkpoints after the failed push; "
+        "without any save() call the falsy-git_pushed assertion below "
+        "would pass vacuously on an empty list"
+    )
+    assert all(
+        not git_pushed for _, git_pushed, _ in store.save_calls
+    ), (
+        "no save() after a failed push may record git_pushed=True; "
+        f"save_calls={store.save_calls!r}"
+    )
+
+    # Resume from the persisted file retries the Git phase.
+    git2 = _FakeGit()
+    orch2, _fakes2 = _build(
+        api=_FakeApi(issues=[_issue(1), _issue(2)]),
+        git=git2,
+        state=_PersistingSpyStateStore(state_path),
+        report=_FakeReport(),
+    )
+    orch2.run()
+
+    assert git2.clone_called is True, (
+        "a resume after a failed push must run the Git phase again; "
+        f"clone_called={git2.clone_called!r}"
     )

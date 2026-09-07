@@ -172,6 +172,7 @@ class _NullReporter:
         self.succeeded: list[tuple[int, int]] = []
         self.failed: list[tuple[int, str, str | None]] = []
         self.skipped: list[tuple[int, str]] = []
+        self.skipped_issues: list[int] = []
 
     def issue_started(self, source_number: int, total: int | None = None) -> None:
         self.started.append(int(source_number))
@@ -186,6 +187,9 @@ class _NullReporter:
 
     def comment_skipped(self, source_number: int, reason: str) -> None:
         self.skipped.append((int(source_number), reason))
+
+    def issue_skipped(self, source_number: int) -> None:
+        self.skipped_issues.append(int(source_number))
 
     def git_phase_finished(self, status: str) -> None:
         self.git_statuses.append(status)
@@ -427,3 +431,6 @@ def test_successful_issues_are_checkpointed_and_resume_filters_them() -> None:
     # the checkpointed one without counting as succeeded/failed again.
     # The new result should have one success.
     assert result2.issues_succeeded == 1
+    # issues_attempted counts only issues actually begun: issue 1 was
+    # already in state (1 of 2 pre-migrated), so only issue 2 was attempted.
+    assert result2.issues_attempted == 1
