@@ -56,13 +56,24 @@ class _Sink:
 
 
 class _FakeCodeberg:
-    def __init__(self, issues: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        issues: list[dict[str, Any]] | None = None,
+        comments_by_issue: dict[int, list[dict[str, Any]]] | None = None,
+    ) -> None:
         self.issues = list(issues or [])
+        self.comments_by_issue: dict[int, list[dict[str, Any]]] = dict(
+            comments_by_issue or {}
+        )
         self.calls: list[tuple[str, ...]] = []
 
     def list_issues(self) -> list[dict[str, Any]]:
         self.calls.append(("list_issues",))
         return list(self.issues)
+
+    def list_comments(self, issue_id: int) -> list[dict[str, Any]]:
+        self.calls.append(("list_comments", str(issue_id)))
+        return list(self.comments_by_issue.get(int(issue_id), []))
 
 
 class _FakeGitHub:

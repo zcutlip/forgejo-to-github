@@ -394,7 +394,20 @@ def test_create_issue_runs_before_comments_and_checkpoint():
     contract: it must not post comments to a not-yet-created issue,
     and it must not checkpoint an issue whose creation did not succeed.
     """
-    api = _FakeApi(issues=[_issue(1, comments=3), _issue(2, comments=1)])
+    api = _FakeApi(
+        issues=[_issue(1, comments=3), _issue(2, comments=1)],
+        comments_by_issue={
+            1: [
+                {
+                    "type": "Comment",
+                    "user": {"username": "alice"},
+                    "created_at": "2024-01-02T10:30:00Z",
+                    "body": f"comment {i} for 1",
+                }
+                for i in range(3)
+            ],
+        },
+    )
     state = _FakeState()
     report = _FakeReport()
 

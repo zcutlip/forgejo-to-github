@@ -301,7 +301,14 @@ def _make_codeberg_one_issue() -> Any:
         "title": "Hello world",
         "body": "Issue body",
         "labels": ["bug", "enhancement"],
-        "comments": [{"index": 0, "body": "Nice comment"}],
+        "comments": [
+            {
+                "type": "Comment",
+                "user": {"username": "alice"},
+                "created_at": "2024-01-15T10:00:00Z",
+                "body": "Nice comment",
+            }
+        ],
         "state": "open",
         "closed": False,
     }
@@ -314,7 +321,14 @@ def _make_codeberg_one_issue() -> Any:
             self, issue_id: int, *args: Any, **kwargs: Any
         ) -> list[dict[str, Any]]:
             if issue_id == 1:
-                return [{"index": 0, "body": "Nice comment"}]
+                return [
+                    {
+                        "type": "Comment",
+                        "user": {"username": "alice"},
+                        "created_at": "2024-01-15T10:00:00Z",
+                        "body": "Nice comment",
+                    }
+                ]
             return []
 
         def get_repository_description(self, *args: Any, **kwargs: Any) -> str:
@@ -551,7 +565,9 @@ def test_github_wiring_creates_issue_and_comment_with_concrete_signatures(
         f"comment posted to wrong issue URL (expected GitHub number {github_number}): {comment_call.url!r}"
     )
     assert isinstance(comment_call.json_body, dict)
-    assert comment_call.json_body.get("body") == "Nice comment"
+    assert comment_call.json_body.get("body") == (
+        "> **@alice** commented on 2024-01-15:\n\nNice comment"
+    )
 
     # Label traffic (ensure_label GET + POST per fixture label) precedes issue create.
     calls = github_transport.calls

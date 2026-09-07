@@ -47,6 +47,15 @@ EXPECTED_PUBLIC_CLASSES = {
 }
 
 
+# Maximum public methods per class. The default cap is 7 for every class;
+# forgejo_to_github.reporting.Reporter is allowed 8 per the approved
+# 05-reporter.md seam-table amendment (comment_skipped).
+DEFAULT_MAX_PUBLIC_METHODS = 7
+MAX_PUBLIC_METHODS_BY_CLASS = {
+    "forgejo_to_github.reporting.Reporter": 8,
+}
+
+
 # --- helpers ----------------------------------------------------------------
 
 
@@ -197,9 +206,11 @@ def test_public_class_has_at_most_seven_public_methods(
     """
     klass = _import_attr(module_name, class_name)
     methods = _public_methods(klass)
-    assert len(methods) <= 7, (
+    key = f"{module_name}.{class_name}"
+    cap = MAX_PUBLIC_METHODS_BY_CLASS.get(key, DEFAULT_MAX_PUBLIC_METHODS)
+    assert len(methods) <= cap, (
         f"{module_name}.{class_name} exposes {len(methods)} public methods "
-        f"({methods!r}); the seven-method cap was exceeded"
+        f"({methods!r}); the {cap}-method cap was exceeded"
     )
 
 

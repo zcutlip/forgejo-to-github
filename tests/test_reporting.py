@@ -413,7 +413,9 @@ def _slice_c_issue(number: int, **overrides: Any) -> dict[str, Any]:
 
 
 def _drive_slice_c_issue(
-    issue: dict[str, Any], github: _FakeGitHub
+    issue: dict[str, Any],
+    github: _FakeGitHub,
+    comments_by_issue: dict[int, list[dict[str, Any]]] | None = None,
 ) -> list[tuple[Any, ...]]:
     """Drive the REAL orchestrator over one source issue.
 
@@ -425,7 +427,7 @@ def _drive_slice_c_issue(
         repo=Repository(
             source="owner/source", target="owner/target", skip_git=True, yes=True
         ),
-        codeberg=_FakeCodeberg([issue]),
+        codeberg=_FakeCodeberg([issue], comments_by_issue=comments_by_issue),
         github=github,
         git=_FakeGit(),
         state=_FakeState(),
@@ -460,8 +462,21 @@ def test_reporter_issue_failed_receives_distinct_kind_per_failure_step() -> None
     # 2. comment-post failure.
     comment_github = _FakeGitHub()
     comment_github.fail_comment = True
-    comment_issue = _slice_c_issue(2, comments=[{"index": 0, "body": "a comment"}])
-    comment_calls = _drive_slice_c_issue(comment_issue, comment_github)
+    comment_issue = _slice_c_issue(2)
+    comment_calls = _drive_slice_c_issue(
+        comment_issue,
+        comment_github,
+        comments_by_issue={
+            2: [
+                {
+                    "type": "Comment",
+                    "user": {"username": "bob"},
+                    "created_at": "2024-01-03T08:00:00Z",
+                    "body": "a comment",
+                }
+            ]
+        },
+    )
 
     # 3. label-create failure: ``ensure_label`` raises for "bug".
     label_github = _FakeGitHub()
@@ -529,7 +544,12 @@ def test_orchestrator_skips_malformed_comment_with_warning() -> None:
         [_slice_c_issue(source_number)],
         comments_by_issue={
             source_number: [
-                {"index": 0, "body": "a well-formed comment"},
+                {
+                    "type": "Comment",
+                    "user": {"username": "alice"},
+                    "created_at": "2024-01-02T10:30:00Z",
+                    "body": "a well-formed comment",
+                },
                 {"index": 1, "body": ""},
             ],
         },
