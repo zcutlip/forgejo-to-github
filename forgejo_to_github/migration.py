@@ -573,9 +573,7 @@ class MigrationOrchestrator:
                                 step="label",
                             )
                         )
-                        self._safe_issue_failed(
-                            source_number, "label_create", message
-                        )
+                        self._safe_issue_failed(source_number, "label_create", message)
             # Slice C fidelity: wrap the body with the migration
             # attribution block. Label failures above never block issue
             # creation.
