@@ -123,9 +123,10 @@ Top-level orchestration entry point. Performs these phases in order:
    not the client's; `codeberg.get_repository_description()` always
    returns a string (empty on missing or HTTP error, but the client
    raises on HTTP error; the orchestrator catches and falls back).
-3. **Repository description update.** If a non-empty description was
-   supplied explicitly, call `github.update_repository_description(...)`
-   immediately after repository creation.
+3. **Repository description.** The description is folded into the
+   `github.create_repository(...)` payload per §3.8 (the single source
+   of truth for description policy). The orchestrator never calls
+   `github.update_repository_description(...)`.
 4. **Git mirror.** If `self.repo.skip_git` is `False`, call
    `git.clone()` and then `git.push_branches(local_path)` /
    `git.push_tags(local_path)`. On clone failure, raise (terminal). On
@@ -138,8 +139,21 @@ Top-level orchestration entry point. Performs these phases in order:
    - For each issue whose `number` is not in `state.migrated`:
      - `reporter.issue_started(source_number=..., total=...)`.
      - `github.create_issue(...)`.
-     - For each comment from `codeberg.list_comments(issue_id=...)`:
-       - `github.create_comment(...)`.
+     - Fetch comments unconditionally:
+       `comments = codeberg.list_comments(issue_id=source_number)`
+       (even when the issue payload's `comments` count is zero, matching
+       the `main:f2gh.py` baseline). On fetch failure the issue fails
+       with step `"fetch_comments"` (reported kind `"comment"`) — see
+       the state machine below.
+     - For each comment in `comments`:
+       - Increment `comments_attempted` **before** any filtering, so
+         skipped malformed comments remain visible in the counts.
+       - Skip + `reporter.comment_skipped(source_number, reason)` when
+         the comment is malformed: `type` present and not `"Comment"`,
+         OR body missing/empty, OR author missing. No id check —
+         nothing consumes comment ids.
+       - `github.create_comment(...)` with the
+         `format_comment_body(...)`-wrapped body.
      - If the source issue is closed, `github.close_issue(...)`.
      - `state.save(...)` to record the new mapping.
      - `reporter.issue_succeeded(source_number=..., github_number=...)`.
@@ -174,7 +188,7 @@ states. The state is local to one issue; it does not appear on the
 |------|-------|-----------|-----------|
 | S1 | `reporter.issue_started` | → S2 | n/a (this is reporting) |
 | S2 | `github.create_issue` | → S3 | → S6 (record failure, mark issue as failed) |
-| S3 | for each comment: `github.create_comment` | → S4 | continue to S4; comment count is recorded |
+| S3 | fetch via `codeberg.list_comments`, then per comment: skip-malformed (`reporter.comment_skipped`) or `github.create_comment` | → S4 | fetch failure → S6 (step `"fetch_comments"`, kind `"comment"`); per-comment post failure → continue to S4 (`comments_failed` recorded) |
 | S4 | if closed: `github.close_issue` | → S5 | continue to S5; the close is treated as a warning, not a hard failure (the issue is migrated; the close is the last step) |
 | S5 | `state.save` then `reporter.issue_succeeded` | → next issue | n/a |
 | S6 | accumulate into `MigrationResult.failures` | → next issue | n/a |
@@ -187,7 +201,7 @@ The four "issue-succeeded" / "issue-failed" mappings to
 | `issues_attempted` | S1 begins for this issue |
 | `issues_succeeded` | S5 completes for this issue |
 | `issues_failed` | S6 records a failure (i.e., S2 failed) |
-| `comments_attempted` | S3 begins for each comment |
+| `comments_attempted` | S3 sees each comment — incremented **before** the malformed filter, so skipped comments count as attempted |
 | `comments_succeeded` | S3 completes for each comment (per comment) |
 | `comments_failed` | S3 records a per-comment failure (per comment) |
 
@@ -349,7 +363,7 @@ class IssueFailure:
     kind: str            # "issue_create", "comment", "close_failed", "label_create", or other structured kind
     source_number: int
     message: str         # redaction-safe; the orchestrator does not include the token
-    step: str            # "create", "comment", "close", "label"; finer-grained than kind
+    step: str            # "create", "comment", "close", "label", "fetch_comments"; finer-grained than kind
 ```
 
 `MigrationResult.failures` is `list[IssueFailure]`. The reporter and

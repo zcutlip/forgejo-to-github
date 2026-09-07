@@ -100,6 +100,7 @@ Methods:
 | `issue_started(source_number: int, total: int)` | `output` | Emit a "Migrating Issue #N" line. The `total` argument is the number of issues to migrate in this run, used for the `N/M` progress format. |
 | `issue_succeeded(source_number: int, github_number: int)` | `output` | Emit a "Created issue #M on GitHub" line. |
 | `issue_failed(source_number: int, kind: str, message: str)` | `error_output` | Emit a "FAILED [kind] CB #N: message" line. |
+| `comment_skipped(source_number: int, reason: str)` | `error_output` | Emit a one-line "SKIPPED [comment] CB #N: reason" warning when a source comment is skipped as malformed (non-`"Comment"` type, empty/missing body, or missing author). A skip is not a failure: the issue still proceeds and can still succeed. |
 | `git_phase_finished(status: str)` | `output` or `error_output` based on status | Emit a one-line summary of the Git phase. `"failed"` routes to `error_output`; `"ok"` and `"skipped"` route to `output`. |
 | `render_final(result: MigrationResult)` | both sinks, mixed based on success/failure | Emit the final summary. Idempotent in that calling it twice yields two full summaries (the CLI calls it exactly once). The summary header and counters go to `output`; failure listings and advisory-named lines go to `error_output`. |
 | `exit_outcome(result: MigrationResult) -> int` | n/a | Return 0 on complete success, the documented "incomplete" code on partial failure, the documented "failure" code on terminal failure, and 0 on dry-run regardless of underlying state. The CLI maps this to `sys.exit`. |
@@ -110,6 +111,12 @@ The reporter formats them into the failure line. The reporter
 **does not** receive the title (titles are not preserved in the
 failure path; the legacy code logged them but they were inconsistently
 populated and this is a deliberate cleanup).
+
+`comment_skipped` is deliberately separate from `issue_failed`: a
+skipped comment is an operator-visible warning about malformed source
+data, not an issue failure. It must not affect `issues_failed`, the
+failure listing in the final summary, or the locked `issue_failed`
+kind vocabulary. (Amendment: Slice D remediation, user-approved.)
 
 ### 3.3 Exit-code constants
 

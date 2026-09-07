@@ -679,12 +679,32 @@ resolved as a consequence (the formatting helpers are now live).
 
 **Out of scope for Slice D:** counters beyond comments (Slice E).
 
+**Decisions (user-approved, 2026-09-06):**
+
+1. Warning seam: new `Reporter.comment_skipped(source_number, reason)`
+   method, routed to stderr. Reusing `issue_failed` was rejected — a
+   skipped comment must not render as an issue failure.
+2. Malformed filter: skip + warn when `type` is present and not
+   `"Comment"`, OR body is missing/empty, OR author is missing. The
+   scope item 3's "non-integer id" example is dropped — nothing
+   consumes comment ids.
+3. Fetch-failure mapping: `result.failures` step `"fetch_comments"`
+   (granular, matches `main`'s step vocabulary); reporter kind
+   `"comment"` (no extension of the locked kind vocabulary).
+4. Scope addition: a fifth RED test pins the fetch-failure path.
+5. Counter order: `comments_attempted` increments before the
+   malformed filter (restates scope item 3 precisely).
+6. Fetch is unconditional per issue, even when the issue payload's
+   `comments` count is zero (matches the `main:f2gh.py` baseline).
+
 **RED tests (all `to be added`):**
 
 - `test_orchestrator_fetches_comments_via_codeberg_client`
 - `test_orchestrator_wraps_comment_bodies_with_attribution`
 - `test_orchestrator_counts_skipped_malformed_comments`
 - `test_orchestrator_logs_warning_for_malformed_comment`
+- `test_orchestrator_comment_fetch_failure_fails_issue` (scope
+  addition, user-approved per decision 4)
 
 **GREEN work:**
 
