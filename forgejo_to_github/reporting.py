@@ -215,9 +215,7 @@ class Reporter:
                     dry_lines.append("Repo: existing")
                 elif repo_exists_raw is False:
                     dry_lines.append("Repo: would be created")
-                dry_lines.append(
-                    f"Issues: would process {issues_discovered} issues"
-                )
+                dry_lines.append(f"Issues: would process {issues_discovered} issues")
                 dry_lines.append(
                     f"Comments: would post {int(comments_discovered) if isinstance(comments_discovered, int) else 0}"
                 )
