@@ -69,6 +69,7 @@ locked public contract.
 from __future__ import annotations
 
 import contextlib
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -83,6 +84,8 @@ from forgejo_to_github.domain import (
 # lacks one. The GitHub client does not default colors; this constant
 # is the orchestrator's documented fallback.
 DEFAULT_LABEL_COLOR: str = "ededed"
+
+_ISSUE_MUTATION_PAUSE_SECONDS: float = 0.3
 
 
 class MigrationOrchestrator:
@@ -534,6 +537,7 @@ class MigrationOrchestrator:
             else:
                 labels_arg = []
             github_number = int(self.github.create_issue(title, body, labels_arg))
+            time.sleep(_ISSUE_MUTATION_PAUSE_SECONDS)
         except Exception as exc:  # noqa: BLE001 — issue create failure
             result.issues_failed += 1
             message = str(exc) or exc.__class__.__name__
@@ -577,6 +581,7 @@ class MigrationOrchestrator:
 
             result.comments_succeeded += 1
             self._safe_record_comment(source_number, comment_index, response)
+            time.sleep(_ISSUE_MUTATION_PAUSE_SECONDS)
 
         # S4: close if the source issue was closed. Failures here are
         # warnings; the issue itself is still considered succeeded.
@@ -586,6 +591,7 @@ class MigrationOrchestrator:
             if callable(close):
                 try:
                     close(github_number)
+                    time.sleep(_ISSUE_MUTATION_PAUSE_SECONDS)
                 except Exception as exc:  # noqa: BLE001 — close warning
                     result.failures.append(
                         IssueFailure(
