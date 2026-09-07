@@ -638,6 +638,23 @@ ruff check forgejo_to_github/reporting.py
 mypy forgejo_to_github/migration.py             # informational
 ```
 
+**Addendum (discovered during Slice C GREEN, user-approved):** two
+test-side amendments were required to complete the slice, both recorded
+here so this ledger remains the complete record:
+
+1. `test_orchestrator_migrates_issues_in_creation_date_order` was
+   unsatisfiable as written: its `_FakeApi.create_issue` derived the
+   recorded issue number from call position, so it recorded API order
+   regardless of actual creation order. Fixed by recording the title
+   per `create_issue` call; the assertion (created_at-ascending) is
+   contract-intact.
+2. `test_github_wiring_creates_issue_and_comment_with_concrete_signatures`
+   pinned the pre-Slice-C raw-body contract (`body == "Issue body"`)
+   and positional POST assumptions that predate `ensure_label`.
+   Amended to expect the attribution-wrapped body and to select/verify
+   POSTs by URL with label traffic scripted (GET 404 → POST 201 per
+   label, label traffic before the issue create).
+
 **Stop gate (Slice C):** report the diff, the new test names, the
 verification outcomes, and any spec deviation. Note that #20 is
 resolved as a consequence (the formatting helpers are now live).
