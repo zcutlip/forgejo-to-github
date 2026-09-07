@@ -159,7 +159,7 @@ class _NullReporter:
         self.git_statuses: list[str] = []
         self.started: list[int] = []
         self.succeeded: list[tuple[int, int]] = []
-        self.failed: list[tuple[int, str]] = []
+        self.failed: list[tuple[int, str, str | None]] = []
 
     def issue_started(self, source_number: int, total: int | None = None) -> None:
         self.started.append(int(source_number))
@@ -167,8 +167,8 @@ class _NullReporter:
     def issue_succeeded(self, source_number: int, github_number: int) -> None:
         self.succeeded.append((int(source_number), int(github_number)))
 
-    def issue_failed(self, source_number: int, reason: str) -> None:
-        self.failed.append((int(source_number), str(reason)))
+    def issue_failed(self, source_number: int, kind: str, message: str | None = None) -> None:
+        self.failed.append((int(source_number), kind, message))
 
     def git_phase_finished(self, status: str) -> None:
         self.git_statuses.append(status)

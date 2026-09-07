@@ -192,8 +192,8 @@ class _FakeReport:
     def issue_succeeded(self, source_number: int, github_number: int) -> None:
         self.events.append(("issue_succeeded", str(source_number), str(github_number)))
 
-    def issue_failed(self, source_number: int, reason: str) -> None:
-        self.events.append(("issue_failed", str(source_number), str(reason)))
+    def issue_failed(self, source_number: int, kind: str, message: str | None = None) -> None:
+        self.events.append(("issue_failed", str(source_number), kind, message))
 
     def git_phase_finished(self, status: str) -> None:
         self.events.append(("git_phase_finished", status))
@@ -1610,7 +1610,7 @@ def test_orchestrator_runs_preflight_before_git_phase() -> None:
 
 
 # ===========================================================================
-# RED class: F. Pacing between issue mutations (Slice B RED, append-only)
+# Pacing between issue mutations (append-only)
 # ===========================================================================
 #
 # Contract (Slice B): the orchestrator paces successive GitHub
@@ -1725,4 +1725,166 @@ def test_orchestrator_pauses_between_issue_mutation_calls(monkeypatch: Any) -> N
     assert all(seconds == expected_pause for seconds in pacing), (
         "every pacing call must pass the 0.3 s module constant; "
         f"pacing={pacing!r}, expected={expected_pause!r}"
+    )
+
+
+# ===========================================================================
+# Issue fidelity: ordering, labels, attribution (append-only)
+# ===========================================================================
+#
+# Contract (Slice C): the per-issue loop enriches each migrated issue —
+# issues are migrated in ``created_at`` ascending order, Codeberg label
+# dicts are mapped to plain name strings, each label is ensured via
+# ``github.ensure_label`` (defaulting a missing color to ``"ededed"``)
+# before ``create_issue``, and the body is wrapped with the
+# ``format_issue_body`` attribution block.
+#
+# RED-stage expectation: all five tests fail because the current loop
+# iterates API order, stringifies label dicts, never calls
+# ``ensure_label``, and passes the raw body through.
+
+
+def test_orchestrator_migrates_issues_in_creation_date_order() -> None:
+    """Source issues scrambled vs ``created_at`` are created oldest-first."""
+    issues = [
+        {"number": 1, "title": "newest", "created_at": "2024-03-01T10:00:00Z"},
+        {"number": 2, "title": "oldest", "created_at": "2024-01-01T10:00:00Z"},
+        {"number": 3, "title": "middle", "created_at": "2024-02-01T10:00:00Z"},
+    ]
+    api = _FakeApi(issues=issues)
+
+    orch, _fakes = _build(api=api, state=_FakeState(), report=_FakeReport())
+
+    orch.run()
+
+    create_calls = [c for c in api.calls if c[0] == "create_issue"]
+    order = [c[1] for c in create_calls]
+    assert order == ["2", "3", "1"], (
+        "issues must be migrated in created_at ascending order; "
+        f"got {order!r}"
+    )
+
+
+def test_orchestrator_passes_label_names_not_dicts() -> None:
+    """Codeberg label dicts must reach ``create_issue`` as plain names."""
+    issue = _issue(1)
+    issue["labels"] = [{"name": "bug", "color": "ff0000"}, {"name": "ui"}]
+    api = _FakeApi(issues=[issue])
+    captured: dict[str, Any] = {}
+    real_create_issue = api.create_issue
+
+    def _recording_create_issue(title: str, body: str, labels: list[str]) -> int:
+        captured["labels"] = list(labels)
+        return real_create_issue(title, body, labels)
+
+    api.create_issue = _recording_create_issue  # type: ignore[method-assign]
+
+    orch, _fakes = _build(api=api, state=_FakeState(), report=_FakeReport())
+
+    orch.run()
+
+    assert captured.get("labels") == ["bug", "ui"], (
+        "create_issue must receive plain label name strings; "
+        f"got {captured.get('labels')!r}"
+    )
+
+
+def test_orchestrator_ensures_each_label_before_creating_issue() -> None:
+    """Each label is ensured once, and all ensures precede the create."""
+    issue = _issue(1)
+    issue["labels"] = [{"name": "bug", "color": "ff0000"}, {"name": "ui"}]
+    api = _FakeApi(issues=[issue])
+    order: list[str] = []
+    real_create_issue = api.create_issue
+
+    def _recording_create_issue(title: str, body: str, labels: list[str]) -> int:
+        order.append("create_issue")
+        return real_create_issue(title, body, labels)
+
+    def _recording_ensure_label(
+        name: str, color: str = "", description: str = ""
+    ) -> None:
+        order.append(f"ensure_label:{name}")
+        api.calls.append(("ensure_label", name))
+
+    api.create_issue = _recording_create_issue  # type: ignore[method-assign]
+    api.ensure_label = _recording_ensure_label  # type: ignore[attr-defined]
+
+    orch, _fakes = _build(api=api, state=_FakeState(), report=_FakeReport())
+
+    orch.run()
+
+    ensure_indices = [
+        i for i, event in enumerate(order) if event.startswith("ensure_label")
+    ]
+    assert len(ensure_indices) == 2, (
+        f"ensure_label must be called once per label (2); order={order!r}"
+    )
+    create_index = order.index("create_issue")
+    assert all(i < create_index for i in ensure_indices), (
+        "all ensure_label calls must happen before the create_issue call; "
+        f"order={order!r}"
+    )
+
+
+def test_orchestrator_uses_default_label_color_when_source_label_lacks_color() -> None:
+    """A source label without a color is ensured with ``"ededed"``."""
+    issue = _issue(1)
+    issue["labels"] = [{"name": "ui"}]
+    api = _FakeApi(issues=[issue])
+    ensured: list[tuple[str, str, str]] = []
+
+    def _recording_ensure_label(
+        name: str, color: str, description: str = ""
+    ) -> None:
+        ensured.append((name, color, description))
+        api.calls.append(("ensure_label", name))
+
+    api.ensure_label = _recording_ensure_label  # type: ignore[attr-defined]
+
+    orch, _fakes = _build(api=api, state=_FakeState(), report=_FakeReport())
+
+    orch.run()
+
+    assert len(ensured) == 1, (
+        f"ensure_label must be called once for the single label; got {ensured!r}"
+    )
+    assert ensured[0][1] == "ededed", (
+        "a source label lacking a color must be ensured with the default "
+        f'"ededed"; got {ensured!r}'
+    )
+
+
+def test_orchestrator_wraps_issue_body_with_attribution_block() -> None:
+    """The body passed to ``create_issue`` carries the attribution block."""
+    issue = _issue(5, title="attributed")
+    issue["body"] = "hello world"
+    issue["user"] = {"login": "alice"}
+    issue["created_at"] = "2024-05-06T12:34:56Z"
+    api = _FakeApi(issues=[issue])
+    captured: dict[str, Any] = {}
+    real_create_issue = api.create_issue
+
+    def _recording_create_issue(title: str, body: str, labels: list[str]) -> int:
+        captured["body"] = body
+        return real_create_issue(title, body, labels)
+
+    api.create_issue = _recording_create_issue  # type: ignore[method-assign]
+
+    orch, _fakes = _build(api=api, state=_FakeState(), report=_FakeReport())
+
+    orch.run()
+
+    body = captured.get("body", "")
+    assert body.startswith("> **Migrated from Codeberg**"), (
+        "migrated body must start with the attribution block; "
+        f"got {body!r}"
+    )
+    assert "5" in body, f"attribution block must contain the issue index 5; got {body!r}"
+    assert "alice" in body, (
+        f"attribution block must contain the author handle alice; got {body!r}"
+    )
+    assert "2024-05-06" in body, (
+        "attribution block must contain the date part before T "
+        f"(2024-05-06); got {body!r}"
     )
