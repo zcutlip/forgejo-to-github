@@ -159,25 +159,37 @@ client applies them. Earlier rules win:
 | # | Status / condition | Translated to |
 |---|--------------------|---------------|
 | 1 | 2xx with valid payload | normal return |
-| 2 | 429 | `GitHubRateLimitError` with `retry_after: int | None`. Retried up to 3 times within the client before giving up. |
-| 3 | 403 with `X-RateLimit-Remaining: 0` (header present and zero) | `GitHubRateLimitError` carrying `reset: int | None`. Not retried; raised immediately on the single response. |
-| 4 | 401 | `GitHubAuthError` |
-| 5 | 403 (other than 3 above) | `GitHubAuthError` |
-| 6 | 422 | `GitHubValidationError` carrying parsed `errors` from the response body |
-| 7 | 5xx | `GitHubTransportError` |
-| 8 | Underlying transport raises | `GitHubTransportError` |
+| 2 | 429, or 403 with `X-RateLimit-Remaining: 0` (header present and zero) | `GitHubRateLimitError` with `retry_after: int \| None` and/or `reset: int \| None`. Both signals are retried up to 3 **total** attempts within the client before giving up (one initial request plus up to two retries). |
+| 3 | 401 | `GitHubAuthError` |
+| 4 | 403 (other than the rate-limit signal in 2 above) | `GitHubAuthError` |
+| 5 | 422 | `GitHubValidationError` carrying parsed `errors` from the response body |
+| 6 | 5xx | `GitHubTransportError` |
+| 7 | Underlying transport raises | `GitHubTransportError` |
 
-The retry/backoff behavior for 429 lives inside the GitHub client, not
-the orchestrator. After three attempts on 429, the client raises
-`GitHubRateLimitError`. The test
+The retry/backoff behavior for rate-limited responses (429, or 403 with
+`X-RateLimit-Remaining: 0`) lives inside the GitHub client, not the
+orchestrator. Both signals are retried up to 3 total attempts; on the
+third rate-limited response the client raises `GitHubRateLimitError`.
+The tests
 `test_rate_limit_429_is_retried_then_terminates_with_rate_limit_error`
-asserts that exactly three POST attempts are issued before the client
-gives up. The retry policy between attempts is implementation-defined
+and
+`test_403_with_zero_rate_limit_remaining_retries_then_raises`
+each assert exactly three POST attempts before the client gives up.
+The retry policy between attempts is implementation-defined
 (but bounded by the 3-attempt cap) and not part of the public contract.
-A 403 with `X-RateLimit-Remaining: 0` is not retried; the client raises
-`GitHubRateLimitError` immediately on the single response. The test
-`test_403_with_zero_rate_limit_remaining_raises_rate_limit_error`
-asserts exactly one POST attempt before the raise.
+Delay comes from `Retry-After` (or `X-RateLimit-Reset - now` when
+`Retry-After` is absent) plus additive jitter
+(`delay + random.uniform(0, _JITTER_SECONDS)`, `_JITTER_SECONDS = 1.0`).
+Amendment (Slice B remediation, user-approved): an earlier amendment to
+this section codified "403 raises immediately"; that codified a
+regression against the pre-refactor baseline (`gh_request` retried both
+signals) and is reverted here.
+
+Before returning from a request whose response carries
+`X-RateLimit-Remaining` below 10, the client proactively sleeps 2
+seconds (primary-rate-limit safeguard, restored from the pre-refactor
+`gh_request`). `test_github_client_proactive_sleep_when_remaining_low`
+locks this.
 
 Headers (production default adapter only; the test fake observes
 whatever headers the client constructs):
@@ -267,7 +279,7 @@ preserved are:
   `test_transport_error_does_not_leak_token` (Codeberg) and by the
   redaction discipline implicit in
   `test_rate_limit_429_is_retried_then_terminates_with_rate_limit_error`
-  and `test_403_with_zero_rate_limit_remaining_raises_rate_limit_error`
+  and `test_403_with_zero_rate_limit_remaining_retries_then_raises`
   (GitHub). The implementation must apply redaction before raising.
 - **No dependency on the orchestrator or reporter.** The clients know
   nothing about `MigrationOrchestrator`, `Reporter`, or `StateStore`.
@@ -337,7 +349,9 @@ GitHub:
 - `tests/test_github_client.py::test_ensure_label_does_not_repost_when_label_already_exists`
 - `tests/test_github_client.py::test_create_issue_422_raises_validation_error_with_messages`
 - `tests/test_github_client.py::test_create_issue_auth_errors_raise_github_auth_error`
-- `tests/test_github_client.py::test_403_with_zero_rate_limit_remaining_raises_rate_limit_error`
+- `tests/test_github_client.py::test_403_with_zero_rate_limit_remaining_retries_then_raises`
+- `tests/test_github_client.py::test_github_client_proactive_sleep_when_remaining_low`
+- `tests/test_github_client.py::test_github_client_retry_includes_jitter`
 - `tests/test_github_client.py::test_rate_limit_429_is_retried_then_terminates_with_rate_limit_error`
 
 Package boundary:
