@@ -51,6 +51,10 @@ _USER_AGENT: str = "forgejo-to-github/0.2.0"
 # ``Accept`` header for JSON responses. Always set.
 _ACCEPT_JSON: str = "application/json"
 
+# Default HTTP timeout in seconds. Mirrors the legacy ``main:f2gh.py``
+# behavior which passed ``timeout=30`` on every ``requests.get()`` call.
+DEFAULT_TIMEOUT_SECONDS: float = 30.0
+
 
 # ---------------------------------------------------------------------------
 # Error hierarchy
@@ -167,6 +171,7 @@ class CodebergClient:
         repo: str,
         token: str | None,
         transport: Transport | None = None,
+        timeout: float | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._owner = owner
@@ -174,6 +179,9 @@ class CodebergClient:
         self._token = token
         self._transport: Transport = (
             transport if transport is not None else RequestsTransport()
+        )
+        self._timeout: float = (
+            DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout
         )
 
     # --- properties ---------------------------------------------------------
@@ -218,6 +226,7 @@ class CodebergClient:
                 "GET",
                 url,
                 headers=self._headers(),
+                timeout=self._timeout,
             )
         except Exception as exc:
             raise CodebergTransportError(
@@ -282,6 +291,7 @@ class CodebergClient:
                 "GET",
                 url,
                 headers=self._headers(),
+                timeout=self._timeout,
             )
         except Exception as exc:
             raise CodebergTransportError(
@@ -351,6 +361,7 @@ class CodebergClient:
                     url,
                     params=params,
                     headers=self._headers(),
+                    timeout=self._timeout,
                 )
             except Exception as exc:
                 raise CodebergTransportError(

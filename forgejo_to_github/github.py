@@ -60,6 +60,10 @@ _API_VERSION: str = "2022-11-28"
 # Media type expected by GitHub REST v3.
 _ACCEPT_HEADER: str = "application/vnd.github+json"
 
+# Default HTTP timeout in seconds. Mirrors the legacy ``main:f2gh.py``
+# behavior which passed ``timeout=30`` on every ``requests`` call.
+DEFAULT_TIMEOUT_SECONDS: float = 30.0
+
 
 # ---------------------------------------------------------------------------
 # Error hierarchy
@@ -233,6 +237,7 @@ class GitHubClient:
         repo: str,
         token: str | None,
         transport: Transport | None = None,
+        timeout: float | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._owner = owner
@@ -240,6 +245,9 @@ class GitHubClient:
         self._token = token
         self._transport: Transport = (
             transport if transport is not None else RequestsTransport()
+        )
+        self._timeout: float = (
+            DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout
         )
 
     # --- properties ---------------------------------------------------------
@@ -410,6 +418,7 @@ class GitHubClient:
                     url,
                     headers=self._headers(),
                     json_body=json_body,
+                    timeout=self._timeout,
                 )
             except Exception as exc:
                 raise GitHubTransportError(
