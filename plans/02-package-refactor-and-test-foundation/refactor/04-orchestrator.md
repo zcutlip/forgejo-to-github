@@ -25,6 +25,7 @@ translating the result into an exit code.
 - **New module:** `forgejo_to_github/migration.py` containing:
   - `MigrationOrchestrator` class.
   - `MigrationResult` dataclass.
+  - `DryRunDiscovery` frozen dataclass.
   - `Repository` frozen dataclass.
   - `IssueFailure` dataclass.
   - Optional small helpers (e.g., a label-default-color constant).
@@ -87,11 +88,31 @@ def run(self) -> MigrationResult: ...
 Top-level orchestration entry point. Performs these phases in order:
 
 1. **Dry-run short-circuit.** If `self.repo.dry_run` is `True`, skip
-   all phases 2–5 and produce a `MigrationResult` whose `git["clone"]`
-   and `git["push"]` are both `"skipped"`, whose failure lists are
-   empty, and whose counters are zero. The reporter is **not** called
-   during a dry-run. The CLI is responsible for emitting the dry-run
-   final summary (see stage 06 for the dry-run wording rules).
+   all phases 2–5 and instead perform read-only discovery by issuing
+   read-only `GET` requests for the target repository status, the
+   source repository metadata/description, and the source issues
+   (plus, for each discovered source issue, its comments, so the
+   discovered comment count can be computed). No mutating request
+   (`POST`/`PATCH`/`PUT`/`DELETE`), no git subprocess, and no state
+   write is performed. Produce a
+   `MigrationResult` whose `git["clone"]` and `git["push"]` are both
+   `"skipped"`, whose failure lists are empty, and whose migration
+   counters are zero (`issues_attempted == 0`: a dry run never enters
+   an issue). Discovery is recorded separately from the attempt
+   counters: the result sets `issues_discovered` to the number of
+   source issues found by the read-only listing, so the result and
+   the final report reflect the discovered data rather than reporting
+   zero. The result also carries a populated `DryRunDiscovery` value
+   in `discovery` (see §3.7.1): the target repository, whether
+   the target repository already exists, the total comment count
+   discovered across the source issues, the state file path, and the
+   number of issues checkpointed in the loaded state. Normal-run
+   counter semantics are unchanged:
+   `issues_discovered` stays `0` outside dry-run and
+   `discovery` stays `None`.
+   The reporter is **not** called during a dry-run. The CLI is
+   responsible for emitting the dry-run final summary (see stage 06
+   for the dry-run wording rules).
 2. **Pre-flight.** If `self.repo.target` does not yet exist on
    GitHub, fetch the source repository description (via
    `codeberg.get_repository_description()`) when no explicit
@@ -102,9 +123,10 @@ Top-level orchestration entry point. Performs these phases in order:
    not the client's; `codeberg.get_repository_description()` always
    returns a string (empty on missing or HTTP error, but the client
    raises on HTTP error; the orchestrator catches and falls back).
-3. **Repository description update.** If a non-empty description was
-   supplied explicitly, call `github.update_repository_description(...)`
-   immediately after repository creation.
+3. **Repository description.** The description is folded into the
+   `github.create_repository(...)` payload per §3.8 (the single source
+   of truth for description policy). The orchestrator never calls
+   `github.update_repository_description(...)`.
 4. **Git mirror.** If `self.repo.skip_git` is `False`, call
    `git.clone()` and then `git.push_branches(local_path)` /
    `git.push_tags(local_path)`. On clone failure, raise (terminal). On
@@ -114,11 +136,29 @@ Top-level orchestration entry point. Performs these phases in order:
 5. **Issue migration.**
    - `state.load()` to obtain the `MigrationState`.
    - `codeberg.list_issues()` to enumerate.
+   - For each issue: if its `number` is in `state.migrated`, emit
+     `reporter.issue_skipped(source_number)` and continue to the next
+     issue. Resumed issues are **not** counted in `issues_attempted` —
+     that counter increments only when the orchestrator actually
+     begins an issue (Slice E remediation, audit finding #10).
    - For each issue whose `number` is not in `state.migrated`:
      - `reporter.issue_started(source_number=..., total=...)`.
      - `github.create_issue(...)`.
-     - For each comment from `codeberg.list_comments(issue_id=...)`:
-       - `github.create_comment(...)`.
+     - Fetch comments unconditionally:
+       `comments = codeberg.list_comments(issue_id=source_number)`
+       (even when the issue payload's `comments` count is zero, matching
+       the `main:f2gh.py` baseline). On fetch failure the issue fails
+       with step `"fetch_comments"` (reported kind `"comment"`) — see
+       the state machine below.
+     - For each comment in `comments`:
+       - Increment `comments_attempted` **before** any filtering, so
+         skipped malformed comments remain visible in the counts.
+       - Skip + `reporter.comment_skipped(source_number, reason)` when
+         the comment is malformed: `type` present and not `"Comment"`,
+         OR body missing/empty, OR author missing. No id check —
+         nothing consumes comment ids.
+       - `github.create_comment(...)` with the
+         `format_comment_body(...)`-wrapped body.
      - If the source issue is closed, `github.close_issue(...)`.
      - `state.save(...)` to record the new mapping.
      - `reporter.issue_succeeded(source_number=..., github_number=...)`.
@@ -153,7 +193,7 @@ states. The state is local to one issue; it does not appear on the
 |------|-------|-----------|-----------|
 | S1 | `reporter.issue_started` | → S2 | n/a (this is reporting) |
 | S2 | `github.create_issue` | → S3 | → S6 (record failure, mark issue as failed) |
-| S3 | for each comment: `github.create_comment` | → S4 | continue to S4; comment count is recorded |
+| S3 | fetch via `codeberg.list_comments`, then per comment: skip-malformed (`reporter.comment_skipped`) or `github.create_comment` | → S4 | fetch failure → S6 (step `"fetch_comments"`, kind `"comment"`); per-comment post failure → continue to S4 (`comments_failed` recorded) |
 | S4 | if closed: `github.close_issue` | → S5 | continue to S5; the close is treated as a warning, not a hard failure (the issue is migrated; the close is the last step) |
 | S5 | `state.save` then `reporter.issue_succeeded` | → next issue | n/a |
 | S6 | accumulate into `MigrationResult.failures` | → next issue | n/a |
@@ -166,7 +206,8 @@ The four "issue-succeeded" / "issue-failed" mappings to
 | `issues_attempted` | S1 begins for this issue |
 | `issues_succeeded` | S5 completes for this issue |
 | `issues_failed` | S6 records a failure (i.e., S2 failed) |
-| `comments_attempted` | S3 begins for each comment |
+| `issues_skipped` | Resume guard fires: issue is in `state.migrated` (Slice H) |
+| `comments_attempted` | S3 sees each comment — incremented **before** the malformed filter, so skipped comments count as attempted |
 | `comments_succeeded` | S3 completes for each comment (per comment) |
 | `comments_failed` | S3 records a per-comment failure (per comment) |
 
@@ -203,6 +244,17 @@ behavior for this plan.
   is invoked once at the end of the Git phase.
 - **Cleanup.** `git.cleanup(local_path)` is called from the Git phase
   in a `finally`. The cleanup call survives push failure.
+- **`git_pushed` persistence and resume.** After a successful push
+  (branch and tag pushes both completed), the orchestrator sets
+  `git_pushed = True` and persists it through the existing concrete
+  save path — `MigrationState.git_pushed` and `StateStore.save`
+  already carry the field, so no schema change is needed. On resume,
+  when the loaded state has `git_pushed == True`, the orchestrator
+  skips the **entire** Git phase — both clone and push, matching the
+  `main:f2gh.py` baseline — and records `git["clone"] = "skipped"`
+  and `git["push"] = "skipped"`. When `git_pushed` is `False` (the
+  push failed or never ran), the Git phase runs in full on resume.
+  (Slice E remediation, audit finding §3.1.)
 
 ### 3.6 `Repository`
 
@@ -235,9 +287,11 @@ Fields (these names are part of the contract asserted by
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `issues_attempted` | `int` | Number of issues the orchestrator entered. |
+| `issues_attempted` | `int` | Number of issues the orchestrator entered. Always `0` on a dry run: discovery is not an attempt. |
 | `issues_succeeded` | `int` | Number of issues created successfully. |
 | `issues_failed` | `int` | Number of issues whose create failed. |
+| `issues_skipped` | `int` | Number of issues skipped on resume (already in `state.migrated`). Slice H. |
+| `issues_discovered` | `int` | Number of source issues found by the dry-run read-only listing. `0` on normal runs (discovery is only recorded during dry-run short-circuit). |
 | `comments_attempted` | `int` | Total comments across all attempted issues. |
 | `comments_succeeded` | `int` | Total comments posted successfully. |
 | `comments_failed` | `int` | Total comments that failed. |
@@ -246,6 +300,43 @@ Fields (these names are part of the contract asserted by
 | `clone_status` | `str` | Convenience alias for `git["clone"]`; some tests reach for it. |
 | `push_status` | `str` | Convenience alias for `git["push"]`; some tests reach for it. |
 | `dry_run` | `bool` | True when `repo.dry_run` was set; included for reporter clarity. |
+| `discovery` | `DryRunDiscovery \| None` | Populated only on a dry run; `None` on normal runs. See §3.7.1. |
+
+### 3.7.1 `DryRunDiscovery`
+
+Frozen `@dataclass` populated only by the dry-run short-circuit
+(§3.2 step 1) and attached to `MigrationResult.discovery`. It
+is `None` on normal runs; normal-run result behavior is unchanged.
+
+```python
+@dataclass(frozen=True)
+class DryRunDiscovery:
+    target: str            # "owner/target" as supplied by the CLI
+    repo_exists: bool      # True when the target repository already exists on GitHub
+    comments_discovered: int  # total comments across the discovered source issues
+    state_path: str        # the state file path held by the StateStore
+    state_migrated: int    # number of issues checkpointed in the loaded state
+```
+
+Discovery semantics:
+
+- `target` is the target repository string from `Repository.target`.
+- `repo_exists` reflects the read-only `GET` against the target
+  repository: `True` when it exists, `False` when the GET reports
+  not found. No repository is created.
+- `comments_discovered` is the sum of per-issue comment counts from
+  the read-only `GET` listings of each discovered source issue's
+  comments. No comment is posted.
+- `state_path` is the path the injected `StateStore` was constructed
+  with (its `state_path` attribute, per `01-state-store.md` §3.2).
+  The store is used read-only: state is loaded, never written.
+- `state_migrated` is the number of entries in the loaded state's
+  `migrated` mapping (`len(state.migrated)`).
+
+The reporter consumes this value to render the approved dry-run
+preview summary (stage 05 §3.4 rule 6). `MigrationResult` may carry
+the value even though it is a non-frozen dataclass; the discovery
+value itself is immutable once produced.
 
 ### 3.8 Repository description policy
 
@@ -256,8 +347,13 @@ and the CLI wiring (`06-cli-wiring.md`) defer to it.
 The policy, in order of precedence:
 
 1. **Explicit `--description` wins.** If `repo.description` is non-empty, it is
-   used. The orchestrator calls `github.update_repository_description(...)`
-   immediately after repository creation.
+   passed to `github.create_repository(...)` as part of the create payload. The
+   orchestrator does **not** call `github.update_repository_description(...)`
+   after creation; the description is folded into the create call, matching the
+   `main:f2gh.py` behavioral baseline (see `audit-remediation.md`  row #6). The
+   `update_repository_description` client method remains unit-tested
+   (`test_github_update_repository_description_patches_description`) but is not
+   invoked by the orchestrator.
 2. **Otherwise, use the Codeberg description.** When no explicit description
    was supplied and the target repo did not exist, the orchestrator fetches
    the source description via `codeberg.get_repository_description()` and
@@ -266,9 +362,10 @@ The policy, in order of precedence:
    fetch, the orchestrator logs a one-line warning and falls back to
    `"Migrated from Codeberg"`. No `update_repository_description` call is
    issued.
-4. **Do not PATCH on `--dry-run`.** Under `--dry-run`, no HTTP request and no
-   state write is performed for the description; the dry-run short-circuit
-   applies.
+4. **Do not PATCH on `--dry-run`.** Under `--dry-run`, no mutating
+   request and no state write is performed for the description;
+   read-only `GET` requests (including the source description fetch)
+   are permitted; the dry-run short-circuit applies.
 
 If the target repo already exists, neither fetching the source description nor
 calling `update_repository_description` is performed, regardless of whether
@@ -284,7 +381,7 @@ class IssueFailure:
     kind: str            # "issue_create", "comment", "close_failed", "label_create", or other structured kind
     source_number: int
     message: str         # redaction-safe; the orchestrator does not include the token
-    step: str            # "create", "comment", "close", "label"; finer-grained than kind
+    step: str            # "create", "comment", "close", "label", "fetch_comments"; finer-grained than kind
 ```
 
 `MigrationResult.failures` is `list[IssueFailure]`. The reporter and
@@ -397,7 +494,7 @@ Package boundary:
   (same)
 - `tests/test_package_boundaries.py::test_public_class_has_at_least_two_public_methods`
   (same)
-- `tests/test_package_boundaries.py::test_public_class_has_at_most_seven_public_methods`
+- `tests/test_package_boundaries.py::test_public_class_has_at_most_nine_public_methods`
   (same)
 
 Future tests to be added at stage 04 (do not pre-create; the
@@ -412,11 +509,19 @@ implementing agent adds them after RED review):
 - `test_result_aggregates_counts_for_reporter` — verifies the four
   counter fields and `git["clone"]` / `git["push"]` map to the
   reporter's expectations.
-- `test_dry_run_makes_no_http_or_subprocess_calls` — verifies that
-  the fake transport and fake command runner are not called during
-  a dry-run.
+- `test_dry_run_issues_only_get_requests` — verifies that only
+  read-only `GET` requests are registered with the fake transport
+  during a dry-run; no mutating request is issued.
+- `test_dry_run_makes_no_subprocess_calls` — verifies that the fake
+  command runner is not called during a dry-run.
 - `test_dry_run_does_not_write_state` — verifies that
-  `StateStore.save` is not called during a dry-run.
+  `StateStore.save` is not called during a dry-run and that a
+  pre-populated `state.json` remains byte-for-byte unchanged.
+- `test_dry_run_reports_discovered_issue_count` — verifies that the
+  dry-run result carries `issues_attempted == 0` plus
+  `issues_discovered == 2`, a populated `DryRunDiscovery` value
+  (per §3.7.1), and that the dry-run summary reports
+  "would process 2 issues" rather than reporting zero.
 
 ## 8. Implementation order
 

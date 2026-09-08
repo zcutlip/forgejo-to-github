@@ -6,13 +6,13 @@ Migrate a repository from [Codeberg](https://codeberg.org) / Forgejo to GitHub �
 
 - **Issues, comments, and labels** — migrated in chronological order (pull requests excluded), with the original Codeberg author and date preserved in a blockquote header.
 - **Git mirror** — clones the source as a mirror and pushes all branches and tags.
-- **Resumable** — progress is checkpointed to `state.json` with atomic writes, so an interrupted migration picks up where it left off instead of duplicating work.
+- **Resumable** — progress is checkpointed to `state.json` with atomic writes, so an interrupted migration picks up where it left off instead of duplicating work. If you delete the GitHub repo, delete `state.json` too — otherwise the tool will skip everything the stale state claims is done.
 - **Rate-limit aware** — backs off with jitter when GitHub throttles rapid POST/PATCH operations.
 - **Dry-run mode** — preview exactly what would be created without touching either forge.
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.12+
 - [`gh`](https://cli.github.com/) (optional — used to read your GitHub token if `GITHUB_TOKEN` isn't set)
 
 ## Installation
@@ -58,11 +58,13 @@ The target repo is created for you (private by default) if it doesn't already ex
 | `--skip-git` | Skip the git mirror; migrate issues only |
 | `--public` | Create the target repo public (default: private) |
 | `--description TEXT` | Repo description on GitHub (default: copied from Codeberg, fallback "Migrated from Codeberg") |
+| `--version` | Show version and exit |
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"   # installs type stubs
+./scripts/run-tests.sh    # run the test suite (never invoke pytest directly)
 ruff check .              # lint
-mypy f2gh.py              # type-check
+mypy f2gh.py forgejo_to_github/  # type-check
 ```

@@ -189,23 +189,42 @@ the conflict rather than improvising.
   refactor is defined in `06-cli-wiring.md` §6 and is invoked only with
   user approval at the stage where the amendment is needed.
 
-- **Dry-run contract.** When `repo.dry_run is True`:
+- **Dry-run contract.** When `repo.dry_run is True`, the run is
+  **read-only, not offline**:
 
-  - No HTTP request is issued against Codeberg or GitHub. Tests assert
-    no request is registered with the mock transport.
-  - No subprocess is invoked for `git clone`, `git push`, or `gh auth
-    token`. The Git phase is recorded as `skipped`. Token reads
-    (including the `gh auth token` fallback for `GITHUB_TOKEN`) are
-    **still** performed because they are local, non-network reads from
-    the environment or `gh`'s local auth state.
+  - Read-only `GET` requests to Codeberg and GitHub are permitted for
+    discovery: target repository status, source repository
+    metadata/description, and source issues (plus, for each
+    discovered source issue, its comments, so the discovered comment
+    count can be computed). No mutating request
+    (`POST`/`PATCH`/`PUT`/`DELETE`) may be issued. Tests assert no
+    mutating request is registered with the mock transport.
+  - No git subprocess (`git clone`, `git push`) is invoked. The Git
+    phase is recorded as `skipped`. Token reads (including the `gh
+    auth token` fallback for `GITHUB_TOKEN`) are **still** performed
+    because they are local, non-network reads from the environment or
+    `gh`'s local auth state.
   - State is loaded but never written. The destination `state.json`
     must be unchanged after a dry-run that exits normally.
   - Input validation (parse_args, source/target shape) runs.
   - The orchestrator produces a `MigrationResult` whose `git["clone"]`
     and `git["push"]` are both `"skipped"`, whose failure lists are
-    empty, and whose counters are zero. The reporter's final summary
-    is the dry-run summary (no `Migrated` claims). Exit code is
-    `EXIT_SUCCESS` (0) regardless of underlying state.
+    empty, and whose migration counters are zero (`issues_attempted
+    == 0`: a dry run never enters an issue). The result additionally
+    records `issues_discovered` — the number of source issues found
+    by the read-only listing — and the result and the final report
+    must reflect that discovered count (e.g., "would process N
+    issues") rather than reporting zero. The result also carries a
+    populated `DryRunDiscovery` value (defined in stage 04 §3.7.1)
+    recording the target repository, whether the target repository
+    already exists, the total comment count discovered across the
+    source issues, the state file path, and the number of issues
+    checkpointed in the loaded state. Normal-run result behavior is
+    unchanged: `issues_discovered` is only populated on a dry run and
+    `discovery` is `None` outside dry-run. The reporter's
+    final summary is the dry-run
+    summary (no `Migrated` claims). Exit code is `EXIT_SUCCESS` (0)
+    regardless of underlying state.
 
 - **Checkpoint schema.** A checkpoint is one entry per Codeberg issue.
   Each entry is an `IssueCheckpoint` dataclass:
@@ -312,13 +331,13 @@ future tests are labeled `to be added`.
 | 01-state-store | `forgejo_to_github.state` | `tests/test_state_store.py` | `test_load_returns_default_state_when_file_absent`, `test_load_ignores_checkpoint_with_mismatched_source`, `test_load_ignores_checkpoint_with_mismatched_target`, `test_save_persists_all_fields_and_uses_atomic_replace`, `test_save_calls_os_replace_for_atomic_write`, `test_round_trip_restores_int_keys`, `test_state_store_does_not_expose_module_level_state_file`, `test_state_store_uses_instance_path_not_module_global`, `test_state_store_constructor_takes_path_source_target`, `test_save_signature_locked` | — |
 | 01-state-store (legacy compatibility) | `forgejo_to_github.state` | `tests/test_characterization.py` | `test_load_state_returns_fresh_defaults_when_source_mismatches`, `test_load_state_returns_fresh_defaults_when_target_mismatches`, `test_load_state_returns_fresh_defaults_when_no_state_file`, `test_save_state_uses_os_replace_for_atomic_write` | — |
 | 01-state-store (orchestrator seam) | `forgejo_to_github.migration` | `tests/test_orchestration.py` | `test_create_issue_runs_before_comments_and_checkpoint` (asserts checkpoint via injected fake) | `to be added`: `test_per_issue_checkpoint_advances_only_on_full_success` |
-| 02-api-clients | `forgejo_to_github.codeberg` | `tests/test_codeberg_client.py` | `test_list_issues_paginates_until_empty_page`, `test_list_issues_sends_expected_request_params`, `test_list_issues_sets_json_accept_and_user_agent`, `test_list_issues_omits_auth_header_when_no_token`, `test_list_issues_sends_token_authorization_when_configured`, `test_list_comments_passes_issue_id_param_and_paginates`, `test_get_issue_returns_parsed_payload`, `test_get_issue_404_raises_not_found_with_context`, `test_get_issue_auth_errors_raise_codeberg_auth_error`, `test_transport_error_translates_to_codeberg_transport_error`, `test_transport_error_does_not_leak_token`, `test_429_translates_to_rate_limit_error_with_retry_after`, `test_429_without_retry_after_header_still_raises_rate_limit_error` | — |
-| 02-api-clients | `forgejo_to_github.github` | `tests/test_github_client.py` | `test_create_repository_private_posts_expected_payload`, `test_create_repository_public_posts_private_false`, `test_create_repository_includes_description_when_provided`, `test_create_issue_posts_expected_payload_and_returns_number`, `test_create_comment_posts_body_and_returns_id`, `test_close_issue_patches_state_closed`, `test_ensure_label_posts_payload_when_label_missing`, `test_ensure_label_does_not_repost_when_label_already_exists`, `test_create_issue_422_raises_validation_error_with_messages`, `test_create_issue_auth_errors_raise_github_auth_error`, `test_403_with_zero_rate_limit_remaining_raises_rate_limit_error`, `test_rate_limit_429_is_retried_then_terminates_with_rate_limit_error` | — |
+| 02-api-clients | `forgejo_to_github.codeberg` | `tests/test_codeberg_client.py` | `test_list_issues_paginates_until_empty_page`, `test_list_issues_sends_expected_request_params`, `test_list_issues_sets_json_accept_and_user_agent`, `test_list_issues_omits_auth_header_when_no_token`, `test_list_issues_sends_token_authorization_when_configured`, `test_list_comments_passes_issue_id_param_and_paginates`, `test_get_issue_returns_parsed_payload`, `test_get_issue_404_raises_not_found_with_context`, `test_get_issue_auth_errors_raise_codeberg_auth_error`, `test_transport_error_translates_to_codeberg_transport_error`, `test_transport_error_does_not_leak_token`, `test_429_translates_to_rate_limit_error_with_retry_after`, `test_429_without_retry_after_header_still_raises_rate_limit_error` | `to be added in Slice H`: `test_list_comments_makes_single_request_without_pagination_params`, `test_list_comments_rejects_total_count_mismatch` |
+| 02-api-clients | `forgejo_to_github.github` | `tests/test_github_client.py` | `test_create_repository_private_posts_expected_payload`, `test_create_repository_public_posts_private_false`, `test_create_repository_includes_description_when_provided`, `test_create_issue_posts_expected_payload_and_returns_number`, `test_create_comment_posts_body_and_returns_id`, `test_close_issue_patches_state_closed`, `test_ensure_label_posts_payload_when_label_missing`, `test_ensure_label_does_not_repost_when_label_already_exists`, `test_create_issue_422_raises_validation_error_with_messages`, `test_create_issue_auth_errors_raise_github_auth_error`, `test_403_with_zero_rate_limit_remaining_retries_then_raises`, `test_github_client_proactive_sleep_when_remaining_low`, `test_github_client_retry_includes_jitter`, `test_rate_limit_429_is_retried_then_terminates_with_rate_limit_error` | — |
 | 02-api-clients (description behavior) | `forgejo_to_github.codeberg` and `forgejo_to_github.github` | `tests/test_repository_description.py` | (legacy `f2gh.migrate` tests; rewritten in stage 06 to drive `MigrationOrchestrator` directly; the four end-state contracts remain: explicit description wins; non-empty source description is forwarded; empty source description is not forwarded as a PATCH; HTTP failure on the source metadata call does not forward a PATCH.) | — |
 | 03-git-mirror | `forgejo_to_github.git` | `tests/test_git_service.py` | `test_clone_success_returns_local_path_and_records_command`, `test_clone_nonzero_exit_raises_structured_git_clone_error`, `test_clone_auth_failure_is_classified_as_git_auth_error`, `test_clone_timeout_classified_as_git_clone_timeout_error`, `test_clone_stderr_token_is_redacted_in_error_text`, `test_branch_push_success_returns_remote_ref`, `test_branch_push_failure_raises_git_push_error`, `test_branch_push_non_fast_forward_is_classified_with_advice`, `test_tag_push_success_returns_pushed_refs`, `test_tag_push_failure_raises_git_tag_push_error`, `test_tag_name_containing_token_is_redacted`, `test_url_token_is_redacted_in_logged_command`, `test_extra_header_token_is_redacted_in_command`, `test_clone_failure_advice_has_cause_remediation_and_docs_pointer`, `test_tag_push_failure_advice_references_tag_and_retry`, `test_non_fast_forward_advice_recommends_rebase_or_force_with_lease`, `test_clone_failure_is_terminal_no_github_api_call_after`, `test_branch_push_failure_is_nonfatal_does_not_abort`, `test_tag_push_failure_is_nonfatal_for_issue_migration` | — |
 | 03-git-mirror (legacy `mirror_git_repo` parity, exercised via `f2gh.py`) | `f2gh.mirror_git_repo` | `tests/test_git_errors.py` | `test_clone_network_failure_exits_with_advisory_and_no_token_leak`, `test_clone_auth_failure_mentions_codeberg_token`, `test_push_workflow_scope_rejection_emits_workflow_advisory`, `test_generic_push_failure_labeled_git_push_failed_not_clone_failed` | — |
 | 03-git-mirror (orchestrator hookup) | `forgejo_to_github.migration` | `tests/test_orchestration.py` | `test_clone_runs_before_any_issue_work`, `test_clone_failure_is_terminal_and_skips_issue_migration`, `test_push_failure_does_not_block_issue_migration` | — |
-| 04-orchestrator | `forgejo_to_github.migration` | `tests/test_orchestration.py` | all functions in `tests/test_orchestration.py` | `to be added`: `test_per_issue_checkpoint_advances_only_on_full_success`, `to be added`: `test_resume_skips_issues_already_in_state`, `to be added`: `test_result_aggregates_counts_for_reporter`, `to be added`: `test_dry_run_makes_no_http_or_subprocess_calls`, `to be added`: `test_dry_run_does_not_write_state` |
+| 04-orchestrator | `forgejo_to_github.migration` | `tests/test_orchestration.py` | all functions in `tests/test_orchestration.py` | `to be added`: `test_per_issue_checkpoint_advances_only_on_full_success`, `to be added`: `test_resume_skips_issues_already_in_state`, `to be added`: `test_result_aggregates_counts_for_reporter`, `to be added`: `test_dry_run_issues_only_get_requests`, `to be added`: `test_dry_run_makes_no_subprocess_calls`, `to be added`: `test_dry_run_does_not_write_state`, `to be added`: `test_dry_run_reports_discovered_issue_count` |
 | 04-orchestrator (truthful reporting surfaces) | `forgejo_to_github.migration` | `tests/test_migration_reporting.py` | `test_git_push_failure_is_non_fatal_and_reported`, `test_clone_failure_is_terminal_and_skips_issue_fetch`, `test_issue_failure_is_accumulated_and_later_issues_continue`, `test_successful_issues_are_checkpointed_and_resume_filters_them` | — |
 | 04-orchestrator (issue fetch error handling) | `forgejo_to_github.migration` | `tests/test_issue_fetch_errors.py` | `test_migrate_source_404_exits_gracefully` | — |
 | 04-orchestrator (combined GitHub/Codeberg API seam coverage as legacy baseline) | `f2gh` module-level functions | `tests/test_api_clients.py` | all functions in `tests/test_api_clients.py` | — |

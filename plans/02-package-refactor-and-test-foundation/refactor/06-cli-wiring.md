@@ -119,9 +119,17 @@ implement any phase logic itself.
 
 ### 3.3 Dry-run override at the CLI
 
-The CLI **also** short-circuits on dry-run before constructing the
-orchestrator, so the orchestrator's own dry-run short-circuit is a
-defense-in-depth check. The CLI's pre-orchestrator dry-run behavior
+The CLI does **not** bypass orchestrator discovery on dry-run. It
+constructs the orchestrator and calls `run()` exactly as in a normal
+run; the orchestrator's dry-run short-circuit performs the read-only
+discovery (read-only `GET` requests only; no mutating request, no git
+subprocess, no state write) and records the found issue count in
+`MigrationResult.issues_discovered` while keeping
+`issues_attempted == 0`. The short-circuit also records a
+`DryRunDiscovery` value in `MigrationResult.discovery`
+(target repo, target-repo existence, discovered comment count, state
+path, checkpoint count); that field is `None` on normal runs and
+normal-run result behavior is unchanged. The CLI's dry-run behavior
 is to:
 
 1. Validate `args` (already done by `parse_args`).
@@ -132,9 +140,15 @@ is to:
 6. Call `sys.exit(reporter.exit_outcome(result))` (which returns
    `EXIT_SUCCESS` for dry-run).
 
-The CLI does not issue any HTTP or git subprocess during a dry-run
-because the orchestrator's dry-run short-circuit returns immediately.
-The token reads remain because they are local environment reads.
+The CLI itself issues no HTTP request and invokes no git subprocess
+during a dry-run; the read-only discovery is performed by the
+orchestrator through the injected clients. The token reads remain
+because they are local environment reads. The dry-run final summary
+is the approved informative preview rendered by `render_final`
+(target repo, repo would-be-created/existing status, would-process
+issue count, would-post comment count, skipped Git phases, and the
+state path with its checkpoint count); the locked wording is stage 05
+§3.4 rule 6 and `test-framework-spec.md` §7.4.
 
 ### 3.4 `f2gh._build_orchestrator(args: argparse.Namespace) -> MigrationOrchestrator`
 

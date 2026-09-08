@@ -100,6 +100,8 @@ Methods:
 | `issue_started(source_number: int, total: int)` | `output` | Emit a "Migrating Issue #N" line. The `total` argument is the number of issues to migrate in this run, used for the `N/M` progress format. |
 | `issue_succeeded(source_number: int, github_number: int)` | `output` | Emit a "Created issue #M on GitHub" line. |
 | `issue_failed(source_number: int, kind: str, message: str)` | `error_output` | Emit a "FAILED [kind] CB #N: message" line. |
+| `comment_skipped(source_number: int, reason: str)` | `error_output` | Emit a one-line "SKIPPED [comment] CB #N: reason" warning when a source comment is skipped as malformed (non-`"Comment"` type, empty/missing body, or missing author). A skip is not a failure: the issue still proceeds and can still succeed. |
+| `issue_skipped(source_number: int)` | `output` | Emit a one-line "SKIP CB #N: already migrated" notice when an issue is in `state.migrated` and the orchestrator resumes past it. A resume skip is expected behavior, not an anomaly and not a failure: it routes to the normal output sink (unlike `comment_skipped`). |
 | `git_phase_finished(status: str)` | `output` or `error_output` based on status | Emit a one-line summary of the Git phase. `"failed"` routes to `error_output`; `"ok"` and `"skipped"` route to `output`. |
 | `render_final(result: MigrationResult)` | both sinks, mixed based on success/failure | Emit the final summary. Idempotent in that calling it twice yields two full summaries (the CLI calls it exactly once). The summary header and counters go to `output`; failure listings and advisory-named lines go to `error_output`. |
 | `exit_outcome(result: MigrationResult) -> int` | n/a | Return 0 on complete success, the documented "incomplete" code on partial failure, the documented "failure" code on terminal failure, and 0 on dry-run regardless of underlying state. The CLI maps this to `sys.exit`. |
@@ -110,6 +112,12 @@ The reporter formats them into the failure line. The reporter
 **does not** receive the title (titles are not preserved in the
 failure path; the legacy code logged them but they were inconsistently
 populated and this is a deliberate cleanup).
+
+`comment_skipped` is deliberately separate from `issue_failed`: a
+skipped comment is an operator-visible warning about malformed source
+data, not an issue failure. It must not affect `issues_failed`, the
+failure listing in the final summary, or the locked `issue_failed`
+kind vocabulary. (Amendment: Slice D remediation, user-approved.)
 
 ### 3.3 Exit-code constants
 
@@ -141,9 +149,12 @@ The final summary must obey:
 
 1. When `result.issues_failed == 0` and `result.git["clone"] == "ok"`
    and `result.git["push"] in ("ok", "skipped")` and there are no
-   entries in `result.failures`, the summary contains the substring
-   `"migrated"` and either `"all"` or `"complete"` (per
-   `test_complete_result_reports_complete_migration`).
+   entries in `result.failures` **and** `result.issues_succeeded > 0`,
+   the summary contains the substring `"migrated"` and either `"all"`
+   or `"complete"` (per `test_complete_result_reports_complete_migration`).
+   The `issues_succeeded > 0` guard prevents a zero-work run (all
+   issues skipped, empty source) from falsely claiming "All issues
+   migrated" (Slice H).
 2. When any failure is present, the summary must NOT contain the
    substring `"all migrated"` (per
    `test_result_with_failure_does_not_claim_all_migrated`).
@@ -160,12 +171,48 @@ The final summary must obey:
 5. When `result.git["clone"] == "failed"`, the summary must include
    `"clone"` and `"fail"` substrings (per
    `test_clone_failure_summary_marks_clone_status_distinctly`).
-6. When `result.dry_run is True`, the summary uses a dry-run
-   template that does not say "migrated" or "complete" and does not
-   enumerate failures. The summary text contains the substring
-   `"dry-run"` (per `test_dry_run_summary_does_not_claim_migrated`,
-   to be added in stage 06).
-7. The final summary is written to `output` on success and to
+6. When `result.issues_attempted == 0` and
+   `result.issues_skipped > 0` (all issues were on resume): the
+   header is `"Migration complete — all issues already migrated"`
+   (not `"All issues migrated"`), and the Issues line surfaces the
+   skip count: `"Issues: 0 migrated (N skipped)"` (Slice H).
+7. When `result.issues_attempted == 0` and
+   `result.issues_skipped == 0` and `result.issues_succeeded == 0`
+   (empty source, nothing to do): the header is
+   `"Migration complete — nothing to do"` (Slice H).
+8. When `result.dry_run is True`, the summary is the approved
+   informative dry-run preview. It is rendered from
+   `result.discovery` (the `DryRunDiscovery` value from
+   stage 04 §3.7.1) and `result.issues_discovered`, and consists of
+   these lines:
+
+   ```
+   Dry-run complete — no changes were made.
+   Target repo: owner/target
+   Repo: would be created
+   Issues: would process N issues
+   Comments: would post M
+   Git: clone skipped, push skipped (dry-run)
+   State: path (K checkpointed)
+   ```
+
+   The `Repo:` line reads `would be created` when
+   `discovery.repo_exists` is `False` and `existing` when
+   it is `True`. `N` is `result.issues_discovered`; `M` is
+   `discovery.comments_discovered`; the `State:` path and `K`
+   are `discovery.state_path` and
+   `discovery.state_migrated`. The preview does not claim
+   any issue was migrated and does not enumerate failures (per
+   `test_dry_run_summary_does_not_claim_migrated`, to be added in
+   stage 06), and it is written to the normal-output
+   sink (a dry run produces no failures). The discovered issue count
+   is reported via the `"would process N issues"` wording driven by
+   `result.issues_discovered` (per
+   `tests/test_orchestration.py::test_dry_run_reports_discovered_issue_count`).
+   The template must not consume `issues_attempted` for this: on a
+   dry run that counter is always `0`, and discovery is reported
+   from `issues_discovered` instead.
+9. The final summary is written to `output` on success and to
    `error_output` on any failure (per the new
    `test_reporter_writes_failure_summary_to_error_sink` to be added
    in stage 05).
@@ -252,8 +299,12 @@ Added in stage 05:
 Added in stage 06:
 
 - `tests/test_reporting.py::test_dry_run_summary_does_not_claim_migrated` —
-  asserts the dry-run summary uses the dry-run template and does not
-  contain "migrated" or "complete" as success claims.
+  asserts the dry-run summary is the approved preview (stage 05
+  §3.4 rule 6) rendered from `result.discovery` and does not
+  contain "migrated" or "complete" as success claims. The preview
+  renders the discovered count from `result.issues_discovered` using
+  the "would process N issues" wording; `issues_attempted` is always
+  `0` on a dry run and is never rendered as the dry-run count.
 
 Package boundary:
 
@@ -263,7 +314,7 @@ Package boundary:
   (same)
 - `tests/test_package_boundaries.py::test_public_class_has_at_least_two_public_methods`
   (same)
-- `tests/test_package_boundaries.py::test_public_class_has_at_most_seven_public_methods`
+- `tests/test_package_boundaries.py::test_public_class_has_at_most_nine_public_methods`
   (same)
 
 Legacy parity (must remain green throughout this stage):

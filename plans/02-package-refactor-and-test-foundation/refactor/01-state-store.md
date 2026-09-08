@@ -92,7 +92,11 @@ StateStore(state_path: Path, source: str, target: str)
 `state_path` is a `pathlib.Path`. There is no default value; calling
 `StateStore()` is a `TypeError`. The class does not read or write any
 module-level `STATE_FILE`; importing the module must not surface a
-canonical path constant.
+canonical path constant. The constructed instance retains
+`state_path` as an instance attribute. The orchestrator's dry-run
+discovery reads that attribute to populate
+`DryRunDiscovery.state_path` (stage 04 §3.7.1); this is the only
+cross-module consumer of the attribute.
 
 Methods:
 
@@ -245,7 +249,7 @@ green at the end of this stage:
   (same)
 - `tests/test_package_boundaries.py::test_public_class_has_at_least_two_public_methods`
   (same)
-- `tests/test_package_boundaries.py::test_public_class_has_at_most_seven_public_methods`
+- `tests/test_package_boundaries.py::test_public_class_has_at_most_nine_public_methods`
   (same)
 - `tests/test_package_boundaries.py::test_state_store_constructor_requires_path_source_target`
 - `tests/test_package_boundaries.py::test_state_store_exposes_load_and_save_methods`

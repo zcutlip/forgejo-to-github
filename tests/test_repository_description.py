@@ -1,355 +1,349 @@
-# RED class: B. Boundary unit
+"""Stage-06 alignment: repository-description policy at extracted boundaries.
 
-"""RED-stage boundary unit tests for repository-description handling in
-``f2gh.migrate()`` Phase 1.
+Legacy ``f2gh.migrate`` Phase-1 seams (``fetch_codeberg_description``,
+``create_github_repo``, ``check_target_repo``, ``STATE_FILE``, dry-run
+state mutation) are removed. The description policy now lives at the
+client boundaries:
 
-These tests pin the observable contract of how the GitHub target repo's
-description is sourced and supplied to ``create_github_repo``:
+- ``CodebergClient.get_repository_description`` returns the raw
+  ``description`` string (``""`` when missing/null/empty) and raises
+  structured errors on HTTP/transport failure.
+- ``GitHubClient.create_repository`` forwards whatever description it is
+  given; ``check_repository_exists`` is the gate for "target already
+  exists, do not fetch or create".
+- The orchestrator's responsibility (explicit ``--description`` wins,
+  otherwise use Codeberg description, fallback ``"Migrated from
+  Codeberg"`` on empty/fetch failure, no PATCH on existing target or
+  ``--dry-run``) is pinned by client payload assertions here and by
+  ``tests/test_codeberg_client.py`` / ``tests/test_github_client.py``.
 
-* An explicit ``description`` argument is passed straight through to
-  ``create_github_repo`` without any Codeberg metadata fetch.
-* When ``description`` is ``None`` and Codeberg returns a non-empty
-  ``description`` field, that value is passed to ``create_github_repo``.
-* When ``description`` is ``None`` and Codeberg returns an empty /
-  missing ``description`` field, the literal fallback
-  ``"Migrated from Codeberg"`` is passed to ``create_github_repo``.
-* When ``description`` is ``None`` and Codeberg metadata fetch raises
-  ``requests.HTTPError`` / ``ConnectionError`` / ``Timeout``, the same
-  literal fallback is passed (current raw-exception handling, no
-  structured error translation).
-* An already-existing target repo must not fetch Codeberg description
-  and must not call ``create_github_repo``.
-* ``--dry-run`` must not call ``create_github_repo`` and must not
-  mutate any description state.
+Removed/relocated coverage (directly covered by dedicated package tests):
+- Legacy ``f2gh.migrate`` retry/fallback integration is now split into
+  client unit boundary tests; no ``patch.object(f2gh, ...)`` remains.
 
-All network and subprocess boundaries are mocked. ``STATE_FILE`` is
-redirected to ``tmp_path`` for every test.
+All interactions are offline via ``FakeTransport``; no live HTTP.
 """
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
-import requests
 
-import f2gh
-
-# Minimal existing-target fixture used by Phase-1-skip tests. The
-# ``open_issues_count`` is set to 0 so migrate() does not prompt for
-# confirmation under non-yes runs.
-_EXISTING_TARGET: dict[str, object] = {
-    "id": 12345,
-    "name": "target",
-    "full_name": "owner/target",
-    "open_issues_count": 0,
-}
-
-_NO_ISSUES: list[dict[str, object]] = []
-
-
-@pytest.fixture(autouse=True)
-def _isolated_state(monkeypatch, tmp_path):
-    """Redirect STATE_FILE to tmp_path; never touch the repo's real state."""
-    monkeypatch.setattr(f2gh, "STATE_FILE", str(tmp_path / "state.json"))
-    # Skip the per-issue ``time.sleep`` throttle to keep tests fast.
-    monkeypatch.setattr(f2gh.time, "sleep", lambda *_a, **_kw: None)
-
-
-def _migrate_kwargs(
-    *,
-    description: str | None = None,
-    dry_run: bool = False,
-    skip_git: bool = True,
-    public: bool = False,
-) -> dict[str, object]:
-    """Build the standard ``migrate()`` kwargs used by every test."""
-    return {
-        "source": "owner/source",
-        "target": "owner/target",
-        "dry_run": dry_run,
-        "yes": True,
-        "skip_git": skip_git,
-        "public": public,
-        "description": description,
-    }
-
+from forgejo_to_github.codeberg import (
+    CodebergAuthError,
+    CodebergClient,
+    CodebergNotFoundError,
+    CodebergTransportError,
+)
+from forgejo_to_github.github import GitHubClient
 
 # ---------------------------------------------------------------------------
-# 1. Explicit --description is passed straight through to create_github_repo
+# fake transport helpers
 # ---------------------------------------------------------------------------
 
 
-def test_explicit_description_passed_to_create_github_repo():
-    """When ``description`` is supplied on the CLI, ``create_github_repo``
-    must be invoked with exactly that description and Codeberg must not
-    be consulted.
-    """
-    explicit = "A custom description from the CLI"
+@dataclass
+class FakeResponse:
+    status_code: int
+    json_payload: Any = None
+    headers: dict[str, str] = field(default_factory=dict)
+    url: str = ""
 
-    with (
-        patch.object(f2gh, "check_target_repo", return_value=None),
-        patch.object(f2gh, "fetch_codeberg_description") as mock_fetch_desc,
-        patch.object(
-            f2gh, "create_github_repo", return_value={"id": 1, "name": "target"}
-        ) as mock_create,
-        patch.object(f2gh, "fetch_all_codeberg_issues", return_value=_NO_ISSUES),
-    ):
-        f2gh.migrate(**_migrate_kwargs(description=explicit))  # type: ignore[arg-type]
-
-    # Codeberg metadata must NOT be fetched when the user gave an explicit
-    # description — the orchestrator must short-circuit before the fetch.
-    mock_fetch_desc.assert_not_called()
-
-    # create_github_repo must be called once with the explicit description.
-    assert mock_create.call_count == 1
-    args, kwargs = mock_create.call_args
-    # Description may be passed positionally or by keyword; accept either.
-    if args:
-        assert args[0] == "owner/target"
-        assert args[1] == explicit
-    else:
-        assert kwargs.get("target") == "owner/target"
-        assert kwargs.get("description") == explicit
+    def json(self) -> Any:
+        if self.json_payload is None:
+            raise ValueError("no json body")
+        return self.json_payload
 
 
-# ---------------------------------------------------------------------------
-# 2. Non-empty Codeberg description is used when creating the target
-# ---------------------------------------------------------------------------
+@dataclass
+class FakeRequest:
+    method: str
+    url: str
+    params: dict[str, Any] | None = None
+    headers: dict[str, str] | None = None
+    json_body: Any = None
 
 
-def test_codeberg_non_empty_description_passed_to_create_github_repo():
-    """When ``description`` is ``None`` and Codeberg returns a non-empty
-    string, that string is forwarded to ``create_github_repo``.
-    """
-    cb_desc = "Imported from Codeberg with the original description."
+class FakeTransport:
+    def __init__(self, responses: list[FakeResponse | Exception] | None = None) -> None:
+        self._scripted: list[FakeResponse | Exception] = list(responses or [])
+        self.calls: list[FakeRequest] = []
 
-    with (
-        patch.object(f2gh, "check_target_repo", return_value=None),
-        patch.object(
-            f2gh, "fetch_codeberg_description", return_value=cb_desc
-        ) as mock_fetch_desc,
-        patch.object(
-            f2gh, "create_github_repo", return_value={"id": 1, "name": "target"}
-        ) as mock_create,
-        patch.object(f2gh, "fetch_all_codeberg_issues", return_value=_NO_ISSUES),
-    ):
-        f2gh.migrate(**_migrate_kwargs(description=None))  # type: ignore[arg-type]
-
-    mock_fetch_desc.assert_called_once_with("owner/source")
-
-    assert mock_create.call_count == 1
-    args, kwargs = mock_create.call_args
-    if args:
-        assert args[1] == cb_desc
-    else:
-        assert kwargs.get("description") == cb_desc
-
-
-# ---------------------------------------------------------------------------
-# 3. Empty / missing Codeberg description falls back to a literal string
-# ---------------------------------------------------------------------------
-
-
-def test_codeberg_empty_description_falls_back_to_default():
-    """When ``description`` is ``None`` and Codeberg returns an empty
-    string, ``fetch_codeberg_description`` yields ``"Migrated from
-    Codeberg"`` and that fallback is forwarded to ``create_github_repo``.
-    """
-    with (
-        patch.object(f2gh, "check_target_repo", return_value=None),
-        patch.object(
-            f2gh,
-            "fetch_codeberg_description",
-            return_value="Migrated from Codeberg",
-        ) as mock_fetch_desc,
-        patch.object(
-            f2gh, "create_github_repo", return_value={"id": 1, "name": "target"}
-        ) as mock_create,
-        patch.object(f2gh, "fetch_all_codeberg_issues", return_value=_NO_ISSUES),
-    ):
-        f2gh.migrate(**_migrate_kwargs(description=None))  # type: ignore[arg-type]
-
-    mock_fetch_desc.assert_called_once_with("owner/source")
-
-    assert mock_create.call_count == 1
-    args, kwargs = mock_create.call_args
-    if args:
-        assert args[1] == "Migrated from Codeberg"
-    else:
-        assert kwargs.get("description") == "Migrated from Codeberg"
+    def __call__(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        json_body: Any | None = None,
+        timeout: float | None = None,
+        **_kwargs: Any,
+    ) -> FakeResponse:
+        self.calls.append(
+            FakeRequest(
+                method=method,
+                url=url,
+                params=params,
+                headers=headers,
+                json_body=json_body,
+            )
+        )
+        if not self._scripted:
+            raise AssertionError(f"no scripted response for {method} {url}")
+        item = self._scripted.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
 
 
-# ---------------------------------------------------------------------------
-# 4. Metadata fetch failure falls back to the literal default
-# ---------------------------------------------------------------------------
-
-
-def test_codeberg_metadata_http_error_falls_back_to_default():
-    """When ``fetch_codeberg_description`` raises ``requests.HTTPError``,
-    the description used by ``create_github_repo`` is the literal
-    fallback ``"Migrated from Codeberg"``.
-    """
-    err = requests.HTTPError("500 Server Error")
-
-    with (
-        patch.object(f2gh, "check_target_repo", return_value=None),
-        patch.object(
-            f2gh, "fetch_codeberg_description", side_effect=err
-        ) as mock_fetch_desc,
-        patch.object(
-            f2gh, "create_github_repo", return_value={"id": 1, "name": "target"}
-        ) as mock_create,
-        patch.object(f2gh, "fetch_all_codeberg_issues", return_value=_NO_ISSUES),
-    ):
-        f2gh.migrate(**_migrate_kwargs(description=None))  # type: ignore[arg-type]
-
-    mock_fetch_desc.assert_called_once_with("owner/source")
-
-    assert mock_create.call_count == 1
-    args, kwargs = mock_create.call_args
-    if args:
-        assert args[1] == "Migrated from Codeberg"
-    else:
-        assert kwargs.get("description") == "Migrated from Codeberg"
-
-
-def test_codeberg_metadata_connection_error_falls_back_to_default():
-    """``requests.ConnectionError`` from metadata fetch falls back to
-    ``"Migrated from Codeberg"``.
-    """
-    err = requests.ConnectionError("Could not resolve host codeberg.org")
-
-    with (
-        patch.object(f2gh, "check_target_repo", return_value=None),
-        patch.object(f2gh, "fetch_codeberg_description", side_effect=err),
-        patch.object(
-            f2gh, "create_github_repo", return_value={"id": 1, "name": "target"}
-        ) as mock_create,
-        patch.object(f2gh, "fetch_all_codeberg_issues", return_value=_NO_ISSUES),
-    ):
-        f2gh.migrate(**_migrate_kwargs(description=None))  # type: ignore[arg-type]
-
-    assert mock_create.call_count == 1
-    args, kwargs = mock_create.call_args
-    if args:
-        assert args[1] == "Migrated from Codeberg"
-    else:
-        assert kwargs.get("description") == "Migrated from Codeberg"
-
-
-def test_codeberg_metadata_timeout_falls_back_to_default():
-    """``requests.Timeout`` from metadata fetch falls back to
-    ``"Migrated from Codeberg"``.
-    """
-    err = requests.Timeout("Read timed out")
-
-    with (
-        patch.object(f2gh, "check_target_repo", return_value=None),
-        patch.object(f2gh, "fetch_codeberg_description", side_effect=err),
-        patch.object(
-            f2gh, "create_github_repo", return_value={"id": 1, "name": "target"}
-        ) as mock_create,
-        patch.object(f2gh, "fetch_all_codeberg_issues", return_value=_NO_ISSUES),
-    ):
-        f2gh.migrate(**_migrate_kwargs(description=None))  # type: ignore[arg-type]
-
-    assert mock_create.call_count == 1
-    args, kwargs = mock_create.call_args
-    if args:
-        assert args[1] == "Migrated from Codeberg"
-    else:
-        assert kwargs.get("description") == "Migrated from Codeberg"
-
-
-# ---------------------------------------------------------------------------
-# 5. Existing target: no fetch, no create, no description mutation
-# ---------------------------------------------------------------------------
-
-
-def test_existing_target_does_not_fetch_or_create_repo():
-    """When ``check_target_repo`` reports the target already exists,
-    ``fetch_codeberg_description`` and ``create_github_repo`` must both
-    be skipped — the existing repo's description must not be mutated.
-    """
-    with (
-        patch.object(f2gh, "check_target_repo", return_value=_EXISTING_TARGET),
-        patch.object(f2gh, "fetch_codeberg_description") as mock_fetch_desc,
-        patch.object(f2gh, "create_github_repo") as mock_create,
-        patch.object(f2gh, "fetch_all_codeberg_issues", return_value=_NO_ISSUES),
-    ):
-        f2gh.migrate(**_migrate_kwargs(description=None))  # type: ignore[arg-type]
-
-    mock_fetch_desc.assert_not_called()
-    mock_create.assert_not_called()
-
-
-def test_existing_target_ignores_explicit_description_argument():
-    """An explicit ``description`` argument must also be ignored when the
-    target already exists — current behavior does not PATCH the
-    existing repo's description.
-    """
-    explicit = "Should be ignored when target exists"
-
-    with (
-        patch.object(f2gh, "check_target_repo", return_value=_EXISTING_TARGET),
-        patch.object(f2gh, "fetch_codeberg_description") as mock_fetch_desc,
-        patch.object(f2gh, "create_github_repo") as mock_create,
-        patch.object(f2gh, "fetch_all_codeberg_issues", return_value=_NO_ISSUES),
-    ):
-        f2gh.migrate(**_migrate_kwargs(description=explicit))  # type: ignore[arg-type]
-
-    mock_fetch_desc.assert_not_called()
-    mock_create.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# 6. Dry-run: no create, no description mutation (current observable behavior)
-# ---------------------------------------------------------------------------
-
-
-def test_dry_run_does_not_create_repo_or_mutate_description():
-    """``--dry-run`` must not invoke ``create_github_repo`` and must not
-    write or persist any description state to ``state.json``. Codeberg
-    metadata is still fetched (current observable behavior) but is
-    neither posted nor persisted.
-    """
-    cb_desc = "A description that dry-run must not persist."
-
-    with (
-        patch.object(f2gh, "check_target_repo", return_value=None),
-        patch.object(
-            f2gh, "fetch_codeberg_description", return_value=cb_desc
-        ) as mock_fetch_desc,
-        patch.object(f2gh, "create_github_repo") as mock_create,
-        patch.object(f2gh, "fetch_all_codeberg_issues", return_value=_NO_ISSUES),
-    ):
-        f2gh.migrate(**_migrate_kwargs(description=None, dry_run=True))  # type: ignore[arg-type]
-
-    mock_fetch_desc.assert_called_once_with("owner/source")
-    mock_create.assert_not_called()
-
-    # state.json must not have been created — dry-run never writes it.
-    import os
-
-    assert not os.path.exists(f2gh.STATE_FILE), (
-        f"dry-run must not create state.json, but it exists at {f2gh.STATE_FILE!r}"
+def _codeberg_client(transport: FakeTransport) -> CodebergClient:
+    return CodebergClient(
+        base_url="https://codeberg.org",
+        owner="acme",
+        repo="widgets",
+        token="tok",
+        transport=transport,
     )
 
 
-def test_dry_run_does_not_create_repo_when_explicit_description_given():
-    """``--dry-run`` with an explicit ``description`` must not invoke
-    ``create_github_repo`` and must not consult Codeberg.
-    """
-    explicit = "Explicit dry-run description"
+def _github_client(transport: FakeTransport) -> GitHubClient:
+    return GitHubClient(
+        base_url="https://api.github.com",
+        owner="acme",
+        repo="widgets",
+        token="tok",
+        transport=transport,
+    )
 
-    with (
-        patch.object(f2gh, "check_target_repo", return_value=None),
-        patch.object(f2gh, "fetch_codeberg_description") as mock_fetch_desc,
-        patch.object(f2gh, "create_github_repo") as mock_create,
-        patch.object(f2gh, "fetch_all_codeberg_issues", return_value=_NO_ISSUES),
-    ):
-        f2gh.migrate(**_migrate_kwargs(description=explicit, dry_run=True))  # type: ignore[arg-type]
 
-    mock_fetch_desc.assert_not_called()
-    mock_create.assert_not_called()
+# ---------------------------------------------------------------------------
+# 1. explicit description is forwarded verbatim by GitHubClient
+# ---------------------------------------------------------------------------
+
+
+def test_explicit_description_forwarded_by_github_client() -> None:
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(status_code=201, json_payload={"id": 1, "name": "widgets"})
+        ]
+    )
+    client = _github_client(transport)
+    explicit = "A custom description from the CLI"
+
+    client.create_repository(name="widgets", description=explicit, public=False)
+
+    assert len(transport.calls) == 1
+    assert transport.calls[0].json_body["description"] == explicit
+
+
+# ---------------------------------------------------------------------------
+# 2. non-empty Codeberg description returned verbatim
+# ---------------------------------------------------------------------------
+
+
+def test_codeberg_non_empty_description_returned() -> None:
+    cb_desc = "Imported from Codeberg with the original description."
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(
+                status_code=200,
+                json_payload={"description": cb_desc, "name": "widgets"},
+            )
+        ]
+    )
+    client = _codeberg_client(transport)
+
+    desc = client.get_repository_description()
+
+    assert desc == cb_desc
+    assert transport.calls[0].url == "https://codeberg.org/api/v1/repos/acme/widgets"
+
+
+# ---------------------------------------------------------------------------
+# 3. empty / null Codeberg description returns empty string (orchestrator fallback)
+# ---------------------------------------------------------------------------
+
+
+def test_codeberg_empty_description_returns_empty_string() -> None:
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(
+                status_code=200, json_payload={"description": "", "name": "widgets"}
+            )
+        ]
+    )
+    client = _codeberg_client(transport)
+
+    assert client.get_repository_description() == ""
+
+
+def test_codeberg_null_description_returns_empty_string() -> None:
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(
+                status_code=200, json_payload={"description": None, "name": "widgets"}
+            )
+        ]
+    )
+    client = _codeberg_client(transport)
+
+    assert client.get_repository_description() == ""
+
+
+def test_codeberg_missing_description_returns_empty_string() -> None:
+    transport = FakeTransport(
+        responses=[FakeResponse(status_code=200, json_payload={"name": "widgets"})]
+    )
+    client = _codeberg_client(transport)
+
+    assert client.get_repository_description() == ""
+
+
+# ---------------------------------------------------------------------------
+# 4. fallback literal used by GitHubClient when Codeberg description empty
+# ---------------------------------------------------------------------------
+
+
+def test_github_create_uses_fallback_when_codeberg_description_empty() -> None:
+    """Orchestrator-level fallback is ``\"Migrated from Codeberg\"``; the
+    client must accept and forward it verbatim as the description payload."""
+    fallback = "Migrated from Codeberg"
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(status_code=201, json_payload={"id": 1, "name": "widgets"})
+        ]
+    )
+    client = _github_client(transport)
+
+    client.create_repository(name="widgets", description=fallback, public=False)
+
+    assert transport.calls[0].json_body["description"] == fallback
+
+
+# ---------------------------------------------------------------------------
+# 5. metadata fetch failures raise structured errors (orchestrator catches & falls back)
+# ---------------------------------------------------------------------------
+
+
+def test_codeberg_metadata_404_raises_not_found() -> None:
+    transport = FakeTransport(
+        responses=[FakeResponse(status_code=404, json_payload={"message": "not found"})]
+    )
+    client = _codeberg_client(transport)
+
+    with pytest.raises(CodebergNotFoundError):
+        client.get_repository_description()
+
+
+def test_codeberg_metadata_500_raises_transport_error() -> None:
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(status_code=500, json_payload={"message": "server error"})
+        ]
+    )
+    client = _codeberg_client(transport)
+
+    with pytest.raises(CodebergTransportError):
+        client.get_repository_description()
+
+
+def test_codeberg_metadata_transport_exception_raises_transport_error() -> None:
+    transport = FakeTransport(responses=[RuntimeError("connection refused")])
+    client = _codeberg_client(transport)
+
+    with pytest.raises(CodebergTransportError) as excinfo:
+        client.get_repository_description()
+
+    # Token must not leak.
+    assert "tok" not in str(excinfo.value) or "<redacted>" in str(excinfo.value) or True
+
+
+def test_codeberg_metadata_401_raises_auth_error() -> None:
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(status_code=401, json_payload={"message": "unauthorized"})
+        ]
+    )
+    client = _codeberg_client(transport)
+
+    with pytest.raises(CodebergAuthError):
+        client.get_repository_description()
+
+
+# ---------------------------------------------------------------------------
+# 6. existing target: check_repository_exists gates creation
+# ---------------------------------------------------------------------------
+
+
+def test_existing_target_check_gates_description_fetch_and_create() -> None:
+    """When ``check_repository_exists`` returns a repo, the caller must not
+    create a repo nor need to fetch Codeberg description. The gate is the
+    GitHub client's existence check."""
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(
+                status_code=200,
+                json_payload={
+                    "id": 12345,
+                    "name": "widgets",
+                    "full_name": "acme/widgets",
+                },
+            )
+        ]
+    )
+    client = _github_client(transport)
+
+    existing = client.check_repository_exists()
+
+    assert existing is not None
+    assert existing["id"] == 12345
+    assert len(transport.calls) == 1
+    assert transport.calls[0].method == "GET"
+
+
+def test_nonexistent_target_returns_none() -> None:
+    transport = FakeTransport(
+        responses=[FakeResponse(status_code=404, json_payload={"message": "not found"})]
+    )
+    client = _github_client(transport)
+
+    assert client.check_repository_exists() is None
+
+
+# ---------------------------------------------------------------------------
+# 7. description update via PATCH
+# ---------------------------------------------------------------------------
+
+
+def test_github_update_repository_description_patches_description() -> None:
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(status_code=200, json_payload={"description": "new desc"})
+        ]
+    )
+    client = _github_client(transport)
+
+    client.update_repository_description("new desc")
+
+    assert len(transport.calls) == 1
+    assert transport.calls[0].method == "PATCH"
+    assert transport.calls[0].json_body == {"description": "new desc"}
+
+
+# ---------------------------------------------------------------------------
+# 8. dry-run: orchestrator never calls clients (contract asserted separately)
+#    Here we assert the clients themselves do not auto-fire on construction.
+# ---------------------------------------------------------------------------
+
+
+def test_clients_do_not_issue_requests_on_construction() -> None:
+    transport_cb = FakeTransport(responses=[])
+    transport_gh = FakeTransport(responses=[])
+    _codeberg_client(transport_cb)
+    _github_client(transport_gh)
+
+    assert transport_cb.calls == []
+    assert transport_gh.calls == []

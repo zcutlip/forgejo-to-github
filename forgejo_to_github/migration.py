@@ -1,0 +1,920 @@
+"""Stage 04 — ``MigrationOrchestrator``.
+
+This module owns the public ``MigrationOrchestrator`` class, the seam
+that orders the migration phases and the per-issue substep sequence.
+It is constructed by injecting exactly five collaborators (plus the
+immutable :class:`Repository` value object) and performs no network or
+subprocess work of its own.
+
+Phase ordering
+--------------
+
+1. **Dry-run read-only discovery.** When ``repo.dry_run`` is set,
+   the orchestrator skips phases 2–5 and instead performs read-only
+   discovery through the injected collaborator APIs: a GET-only target
+   repository status check, a policy-gated source description fetch,
+   and the source issue listing. No mutating request is issued, no git
+   subprocess is spawned, and no state is loaded or written. The
+   returned :class:`MigrationResult` keeps every migration counter at
+   zero (``issues_attempted == 0``: discovery is not an attempt),
+   carries the discovered source issue count in ``issues_discovered``,
+   leaves ``git`` at ``{"clone": "skipped", "push": "skipped"}``, has
+   no failures, and sets ``dry_run=True``. The reporter is not called
+   during a dry-run; the CLI owns the dry-run final summary.
+2. **Git mirror.** When ``repo.skip_git`` is not set, the orchestrator
+   invokes the injected Git seam's ``run_clone()`` and then
+   ``run_push()``. A clone failure is terminal: the exception
+   propagates. A push failure is non-fatal: ``git["push"]`` is set to
+   ``"failed"``, ``reporter.git_phase_finished("failed")`` is called,
+   and issue migration proceeds.
+3. **Issue migration.** Each source issue is processed through the
+   per-issue state machine (create → comments → checkpoint).
+   Per-issue failures are accumulated into
+   ``MigrationResult.failures``; the orchestrator does not abort.
+
+The orchestrator never calls ``reporter.render_final`` and never
+invokes ``sys.exit`` / raises ``SystemExit``. The CLI is the single
+owner of the final summary emission and the process exit code.
+
+Constructor signature
+---------------------
+
+The locked production signature is::
+
+    MigrationOrchestrator(
+        repo: Repository,
+        *,
+        codeberg: Any,
+        github: Any,
+        git: Any,
+        state: Any,
+        reporter: Any,
+    )
+
+For backward compatibility with the single-seam ``_FakeApi`` fixture
+in ``tests/test_orchestration.py``, the constructor also accepts the
+aliases ``api=`` (which fills both ``codeberg`` and ``github`` when
+neither is supplied) and ``report=`` (which fills ``reporter``). This
+deviation from the spec is documented in the traceable list; see
+``plans/02-package-refactor-and-test-foundation/refactor/04-orchestrator.md``
+§3.1 and the discussion under "Naming reconciliation with the
+existing test fixture."
+
+Domain types (``Repository``, ``IssueFailure``, ``MigrationResult``)
+are imported from :mod:`forgejo_to_github.domain` and are not
+re-declared here. The dataclasses already exist and are part of the
+locked public contract.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import time
+from collections.abc import Callable
+from typing import Any
+
+from forgejo_to_github.domain import (
+    DryRunDiscovery,
+    IssueFailure,
+    MigrationResult,
+    Repository,
+)
+from forgejo_to_github.formatting import format_comment_body, format_issue_body
+
+# Default color substituted by the orchestrator when a source label
+# lacks one. The GitHub client does not default colors; this constant
+# is the orchestrator's documented fallback.
+DEFAULT_LABEL_COLOR: str = "ededed"
+
+_ISSUE_MUTATION_PAUSE_SECONDS: float = 0.3
+
+
+class MigrationOrchestrator:
+    """Order the migration phases and aggregate per-issue outcomes.
+
+    The orchestrator is constructed by dependency injection. It does
+    not instantiate any collaborator and does not perform network or
+    subprocess work itself. The CLI constructs the concrete
+    collaborators and the :class:`Repository` value object, then
+    hands them to this class.
+
+    The orchestrator returns a :class:`MigrationResult` from
+    :meth:`run`. It does not call ``reporter.render_final``; the CLI
+    is the single owner of the final summary emission.
+
+    Attributes
+    ----------
+    repo : Repository
+        Immutable per-run configuration (frozen dataclass).
+    codeberg : Any
+        Read-only seam providing ``list_issues`` (and, optionally,
+        ``get_repository_description`` for the description policy).
+    github : Any
+        Write seam providing ``create_issue``, ``create_comment``,
+        and (optionally) ``close_issue``.
+    git : Any
+        Subprocess seam providing ``run_clone`` (terminal on raise)
+        and ``run_push`` (non-fatal on raise).
+    state : Any
+        Checkpoint seam providing ``already_migrated`` and
+        ``record_issue`` (and, optionally, ``record_comment``).
+    reporter : Any
+        Reporting seam providing ``issue_started``,
+        ``issue_succeeded``, ``issue_failed``, and
+        ``git_phase_finished``.
+    """
+
+    def __init__(
+        self,
+        repo: Repository,
+        *,
+        codeberg: Any = None,
+        github: Any = None,
+        git: Any,
+        state: Any,
+        reporter: Any = None,
+        # Backward-compatible aliases for the unified test seam. When
+        # ``api`` is supplied and ``codeberg``/``github`` are not, the
+        # single fake fills both collaborator slots. Likewise for
+        # ``report`` → ``reporter``. See module docstring.
+        api: Any = None,
+        report: Any = None,
+        prompter: Callable[[str, bool], bool] | None = None,
+    ) -> None:
+        if codeberg is None and github is None and api is not None:
+            codeberg = api
+            github = api
+        else:
+            if codeberg is None:
+                codeberg = api
+            if github is None:
+                github = api
+
+        if reporter is None:
+            reporter = report
+
+        self.repo: Repository = repo
+        self.codeberg: Any = codeberg
+        self.github: Any = github
+        self.git: Any = git
+        self.state: Any = state
+        self.reporter: Any = reporter
+        self._prompter: Callable[[str, bool], bool] | None = prompter
+        self.prompter: Callable[[str, bool], bool] | None = prompter
+        # Underscore aliases for the pre-flight phase (task naming).
+        self._repo: Repository = repo
+        self._codeberg: Any = codeberg
+        self._github: Any = github
+        self._git: Any = git
+        self._state: Any = state
+        self._reporter: Any = reporter
+
+        # Concrete StateStore integration (narrow seam): orchestrator-owned
+        # in-memory migrated map and cached repo_created/git_pushed, populated
+        # lazily at run start via StateStore.load() when that API is present.
+        self._concrete_state_loaded: bool = False
+        self._concrete_migrated: dict[int, int] = {}
+        self._concrete_repo_created: bool = False
+        self._concrete_git_pushed: bool = False
+
+    # --- public entry point --------------------------------------------------
+
+    def run(self) -> MigrationResult:
+        """Execute the migration phases and return a :class:`MigrationResult`.
+
+        The orchestrator never calls ``sys.exit`` and never raises
+        ``SystemExit``. On clone failure, the underlying exception
+        propagates; on push or per-issue failure, the failure is
+        accumulated into the result and the run continues.
+        """
+        # Phase 1: dry-run read-only discovery. GET requests only — no
+        # mutating HTTP, no git subprocess, no state write, and no
+        # reporter calls. The CLI owns the dry-run summary emission.
+        if bool(getattr(self.repo, "dry_run", False)):
+            return self._discover_dry_run()
+
+        result = MigrationResult()
+
+        # Concrete StateStore resume: load existing checkpoint at run start
+        # when the injected state seam exposes the concrete load()/save()
+        # API. This populates the orchestrator-owned migrated map used for
+        # resume checks, without broadening the legacy already_migrated path.
+        self._ensure_concrete_state_loaded()
+
+        # Pre-flight target-repository phase (normal-run path only;
+        # dry-run returns above via _discover_dry_run). Aborts the run
+        # before any git or issue work when the prompt is denied.
+        if not self._prepare_target(result):
+            return result
+
+        # Phase 4: Git mirror. Skipped entirely when --skip-git is set.
+        if not bool(getattr(self.repo, "skip_git", False)):
+            self.prepare_repository(result)
+
+        # Phase 5: Issue migration. Always attempted after the Git
+        # phase (or skipped-Git), regardless of push outcome.
+        self._migrate_issues(result)
+
+        return result
+
+    # --- dry-run read-only discovery -----------------------------------------
+
+    def _discover_dry_run(self) -> MigrationResult:
+        """Perform the dry-run read-only discovery phase.
+
+        Contract (``plans/02-package-refactor-and-test-foundation/
+        refactor/04-orchestrator.md`` §3.2 step 1 and the approved
+        dry-run decision in ``00-index.md``):
+
+        - Only GET requests are issued, via the injected concrete
+          collaborator APIs: the GitHub target repository status check
+          (``github.check_repository_exists``) and the Codeberg source
+          issue listing (``codeberg.list_issues``). The source
+          description is fetched only under the approved description
+          policy: when the target does not yet exist and no explicit
+          ``--description`` was supplied.
+        - No mutating HTTP request, no git subprocess, and no state
+          write or ``StateStore.save`` call occurs. The result is a
+          fresh ``MigrationResult`` and no orchestrator state is
+          mutated.
+        - Discovery is recorded separately from the attempt counters:
+          ``issues_discovered`` carries the source issue count while
+          ``issues_attempted`` stays ``0``, no migration object is
+          created, and the reporter is never called.
+
+        Errors raised by the discovery calls are represented by the
+        clients' existing error hierarchy and propagate unchanged —
+        the orchestrator neither swallows them nor mutates state.
+        """
+        result = MigrationResult(dry_run=True)
+
+        # Target repository status check (GET). Missing targets surface
+        # in the dry-run summary as ``clone``/``push`` skipped — repo
+        # creation is *not* part of discovery.
+        target_repo: Any = None
+        check = getattr(self.github, "check_repository_exists", None)
+        if callable(check):
+            target_repo = check()  # repo dict on 200, None on 404
+
+        # Source description fetch is policy-gated (spec §3.8 rules 2
+        # and 4): only when the target repository does not yet exist
+        # and no explicit description override was supplied.
+        if target_repo is None and not getattr(self.repo, "description", None):
+            description_fn = getattr(self.codeberg, "get_repository_description", None)
+            if callable(description_fn):
+                description_fn()
+
+        # Source issue listing (GET, paginated). The discovered count
+        # is recorded without incrementing any attempt counter.
+        issues = self._list_issues()
+        result.issues_discovered = len(issues)
+        self._ensure_concrete_state_loaded()
+        result.discovery = DryRunDiscovery(
+            target=self.repo.target,
+            repo_exists=target_repo is not None,
+            comments_discovered=sum(
+                len(comments) if isinstance(comments, list) else int(comments or 0)
+                for issue in issues
+                for comments in [issue.get("comments")]
+            ),
+            state_path=str(getattr(self.state, "state_path", "")),
+            state_migrated=len(self._concrete_migrated),
+        )
+        return result
+
+    # --- pre-flight target-repository phase ------------------------------------
+
+    def _prepare_target(self, result: MigrationResult) -> bool:
+        """Check/create the GitHub target before any git or issue work.
+
+        Returns ``True`` when the run may proceed, ``False`` when the
+        run is aborted (``result.aborted`` is set). Never calls
+        ``update_repository_description`` on either path.
+        """
+        github: Any = getattr(self, "github", getattr(self, "_github", None))
+        codeberg: Any = getattr(self, "codeberg", getattr(self, "_codeberg", None))
+        repo: Any = getattr(self, "repo", getattr(self, "_repo", None))
+        prompter: Any = getattr(self, "_prompter", getattr(self, "prompter", None))
+
+        check = getattr(github, "check_repository_exists", None)
+        if not callable(check):
+            # Legacy single-seam fakes expose no target check; the
+            # pre-flight is a no-op so phase-ordering tests keep passing.
+            return True
+
+        repo_info = check()
+
+        yes = bool(getattr(repo, "yes", False))
+
+        if repo_info is None:
+            # Missing target: confirm, resolve the description, create.
+            if not yes:
+                if prompter is None:
+                    result.aborted = True
+                    return False
+                prompt_text = (
+                    f"Target repository '{getattr(repo, 'target', '')}' "
+                    "does not exist. Create it?"
+                )
+                if not prompter(prompt_text, False):
+                    result.aborted = True
+                    return False
+
+            explicit = getattr(repo, "description", None)
+            if explicit:
+                description: Any = explicit
+            else:
+                get_desc = getattr(codeberg, "get_repository_description", None)
+                if not callable(get_desc):
+                    description = "Migrated from Codeberg"
+                else:
+                    try:
+                        description = get_desc()
+                    except Exception:  # noqa: BLE001 — any fetch failure falls back
+                        description = "Migrated from Codeberg"
+
+            create = getattr(github, "create_repository", None)
+            if callable(create):
+                target = str(getattr(repo, "target", ""))
+                name = target.split("/")[-1] if "/" in target else target
+                public = bool(getattr(repo, "public", False))
+                create(name, description, public)
+            return True
+
+        # Existing target: never create or PATCH the description.
+        open_issues = 0
+        if isinstance(repo_info, dict):
+            try:
+                open_issues = int(repo_info.get("open_issues_count", 0) or 0)
+            except (TypeError, ValueError):
+                open_issues = 0
+        if open_issues > 0 and not yes:
+            if prompter is None:
+                result.aborted = True
+                return False
+            warning = (
+                f"Target repository '{getattr(repo, 'target', '')}' already "
+                f"exists with {open_issues} open issues. Continue?"
+            )
+            if not prompter(warning, False):
+                result.aborted = True
+                return False
+        return True
+
+    # --- public phase entry points -------------------------------------------
+
+    def prepare_repository(self, result: MigrationResult) -> None:
+        """Drive the Git seam: clone the source mirror, then push it.
+
+        This is the repository/Git preparation phase of the migration.
+        It populates ``result.git["clone"]`` and ``result.git["push"]``
+        (along with the ``clone_status`` / ``push_status`` aliases) and
+        notifies the reporter via ``git_phase_finished`` so the CLI can
+        surface the phase outcome in the final summary.
+
+        Failure semantics
+        -----------------
+
+        - Clone failure is **terminal**: the underlying exception
+          propagates out of :meth:`run` and the result is never
+          returned for that run.
+        - Push failure is **non-fatal**: ``result.git["push"]`` is set
+          to ``"failed"``, the reporter is notified, and issue
+          migration proceeds.
+
+        This method is a public phase entry point (not a proxy); it
+        performs the real Git preparation work and exists so callers
+        can drive the repository phase independently of issue
+        migration when needed (e.g., to test the Git phase in
+        isolation).
+
+        Git lifecycle (concrete ``GitMirror``)
+        --------------------------------------
+        The concrete ``GitMirror`` API is ``clone() -> str``,
+        ``push_branches(local_path)``, ``push_tags(local_path)`` and
+        ``cleanup(local_path)``. ``cleanup`` is guaranteed to run in a
+        ``finally`` block after a successful ``clone``, even when a
+        push fails. This ordering is asserted by
+        ``tests/test_concrete_integration.py``.
+
+        Test seam
+        ---------
+        To keep the fake-based orchestration tests in
+        ``tests/test_orchestration.py`` passing without hiding the
+        concrete path, this method detects the concrete API by the
+        presence of a callable ``clone`` attribute. When ``clone`` is
+        present the concrete lifecycle above is used. Otherwise it
+        falls back to the legacy ``run_clone``/``run_push`` seam used
+        only by those fakes. The fallback is narrow and documented
+        here; no broad dual-API complexity is introduced.
+
+        Resume
+        ------
+        When the loaded checkpoint already records a successful push
+        (concrete ``StateStore`` path with ``git_pushed`` truthy), the
+        entire Git phase is skipped — no clone, no branch push, no tag
+        push — and ``result.git`` keeps the skipped map. Legacy seams
+        without ``load()`` always run the phase.
+        """
+        # Resume: a previous run already pushed the mirror. Skip the
+        # entire Git phase; issue migration still proceeds. Consulted
+        # through the same channel as the issue resume checks — no new
+        # state-API surface. Legacy seams (no load()) always run.
+        self._ensure_concrete_state_loaded()
+        if self._is_concrete_state_store() and bool(self._concrete_git_pushed):
+            result.git["clone"] = "skipped"
+            result.git["push"] = "skipped"
+            result.clone_status = "skipped"
+            result.push_status = "skipped"
+            return
+
+        # Concrete GitMirror path — preferred. Detected by presence of
+        # callable ``clone`` so the concrete lifecycle is never hidden
+        # when a real GitMirror is injected.
+        clone_fn = getattr(self.git, "clone", None)
+        if callable(clone_fn):
+            # Clone is terminal. Any raise propagates out of ``run``
+            # and the result is never returned to the caller for this run.
+            local_path = clone_fn()
+            result.git["clone"] = "ok"
+            result.clone_status = "ok"
+
+            push_failed = False
+            try:
+                # Branch push is non-fatal; continue to tag push even on failure.
+                try:
+                    push_branches = getattr(self.git, "push_branches", None)
+                    if callable(push_branches):
+                        push_branches(local_path)
+                except Exception:  # noqa: BLE001 — non-fatal branch push
+                    push_failed = True
+
+                try:
+                    push_tags = getattr(self.git, "push_tags", None)
+                    if callable(push_tags):
+                        push_tags(local_path)
+                except Exception:  # noqa: BLE001 — non-fatal tag push
+                    push_failed = True
+
+                if push_failed:
+                    result.git["push"] = "failed"
+                    result.push_status = "failed"
+                    self._safe_git_phase_finished("failed")
+                else:
+                    result.git["push"] = "ok"
+                    result.push_status = "ok"
+                    self._safe_git_phase_finished("ok")
+                    self._mark_git_pushed()
+            finally:
+                # cleanup runs even after push failures, after successful clone
+                cleanup_fn = getattr(self.git, "cleanup", None)
+                if callable(cleanup_fn):
+                    with contextlib.suppress(Exception):
+                        cleanup_fn(local_path)
+            return
+
+        # Legacy fallback for tests/test_orchestration.py _FakeGit
+        # (run_clone/run_push). Kept narrow; concrete path above is not
+        # hidden when clone exists.
+        self.git.run_clone()
+        result.git["clone"] = "ok"
+        result.clone_status = "ok"
+
+        # Push is non-fatal. Catch any exception, record the status,
+        # notify the reporter, and continue to issue migration.
+        try:
+            self.git.run_push()
+        except Exception:  # noqa: BLE001 — non-fatal push failure
+            result.git["push"] = "failed"
+            result.push_status = "failed"
+            self._safe_git_phase_finished("failed")
+            return
+
+        result.git["push"] = "ok"
+        result.push_status = "ok"
+        self._safe_git_phase_finished("ok")
+        self._mark_git_pushed()
+
+    def _mark_git_pushed(self) -> None:
+        """Checkpoint a successful Git push via the concrete state path.
+
+        Sets the orchestrator-owned ``git_pushed`` flag and persists it
+        through the existing ``StateStore.save(repo_created, git_pushed,
+        migrated)`` channel, preserving the currently known
+        ``repo_created`` and ``migrated`` values. Best-effort:
+        persistence errors are swallowed, mirroring
+        :meth:`_safe_record_issue`. This runs at the end of the Git
+        phase, so the checkpoint lands before issue migration begins.
+        On push failure this is never called: ``git_pushed`` stays
+        falsy and a later resume retries the Git phase. Legacy seams
+        without ``load()``/``save()`` are untouched.
+        """
+        if not self._is_concrete_state_store():
+            return
+        self._ensure_concrete_state_loaded()
+        self._concrete_git_pushed = True
+        save_fn = getattr(self.state, "save", None)
+        if not callable(save_fn):
+            return
+        try:
+            save_fn(
+                self._concrete_repo_created,
+                self._concrete_git_pushed,
+                dict(self._concrete_migrated),
+            )
+        except Exception:  # noqa: BLE001 — state seam is best-effort
+            return
+
+    def _migrate_issues(self, result: MigrationResult) -> None:
+        """Enumerate source issues and migrate each one.
+
+        Issues whose number is reported by ``state.already_migrated``
+        are skipped (resume support). Each remaining issue is passed
+        through :meth:`_migrate_one_issue`, which never raises.
+        """
+        issues = self._list_issues()
+        # Slice C fidelity: migrate oldest-first by creation date.
+        issues = sorted(issues, key=lambda i: str(i.get("created_at") or ""))
+        for issue in issues:
+            try:
+                source_number = int(issue["number"])
+            except (KeyError, TypeError, ValueError):
+                # A malformed issue payload is a structured failure;
+                # we cannot associate it with a source number.
+                continue
+            self._migrate_one_issue(source_number, issue, result)
+
+    def _migrate_one_issue(
+        self,
+        source_number: int,
+        issue: dict[str, Any],
+        result: MigrationResult,
+    ) -> None:
+        """Drive the per-issue state machine for a single source issue.
+
+        Sequence (per ``plans/02-package-refactor-and-test-foundation/
+        refactor/04-orchestrator.md`` §3.4):
+
+        S1. ``reporter.issue_started`` and increment
+            ``issues_attempted``.
+        S2. ``github.create_issue``. On success, advance to S3. On
+            failure, accumulate ``IssueFailure(kind="issue_create")``,
+            increment ``issues_failed``, notify the reporter, and
+            return (next issue).
+        S3. For each comment, ``github.create_comment``. Per-comment
+            failures are accumulated into ``failures`` and counted in
+            ``comments_failed``; the issue still progresses to S5.
+        S4. If the source issue is closed, ``github.close_issue``.
+            Failures are accumulated but the issue is still considered
+            succeeded.
+        S5. ``state.record_issue`` and ``reporter.issue_succeeded``.
+            Increment ``issues_succeeded``.
+        """
+        # Resume: skip already-migrated issues. The state seam's
+        # ``already_migrated`` is consulted before any work is done
+        # for the issue, so even an in-progress run is safe to
+        # interrupt and resume. A resume-skipped issue is not an
+        # attempt: it is neither counted nor reported as started.
+        if self._already_migrated(source_number):
+            self._safe_issue_skipped(source_number)
+            result.issues_skipped += 1
+            return
+
+        result.issues_attempted += 1
+
+        # S1: report progress.
+        self._safe_issue_started(source_number)
+
+        # S2: create the issue via concrete GitHubClient API.
+        try:
+            title = str(issue.get("title", ""))
+            # Slice C fidelity: map Codeberg label payloads to plain
+            # names (dicts contribute ``lbl["name"]``; non-dicts are
+            # stringified as-is; entries without a usable name are
+            # skipped) and ensure each label before creating the issue.
+            labels_raw = issue.get("labels")
+            labels_arg: list[str] = []
+            label_defs: list[tuple[str, str, str]] = []
+            if labels_raw:
+                for lbl in list(labels_raw):
+                    if isinstance(lbl, dict):
+                        name = lbl.get("name")
+                        if not name:
+                            continue
+                        label_name = str(name)
+                        color_raw = lbl.get("color")
+                        color = str(color_raw) if color_raw else DEFAULT_LABEL_COLOR
+                        description = str(lbl.get("description") or "")
+                    else:
+                        label_name = str(lbl)
+                        if not label_name:
+                            continue
+                        color = DEFAULT_LABEL_COLOR
+                        description = ""
+                    labels_arg.append(label_name)
+                    label_defs.append((label_name, color, description))
+            ensure_label = getattr(self.github, "ensure_label", None)
+            if callable(ensure_label):
+                for label_name, color, description in label_defs:
+                    try:
+                        ensure_label(label_name, color, description)
+                    except Exception as exc:  # noqa: BLE001 — label ensure failure
+                        message = str(exc) or exc.__class__.__name__
+                        result.failures.append(
+                            IssueFailure(
+                                kind="label_create",
+                                source_number=source_number,
+                                message=message,
+                                step="label",
+                            )
+                        )
+                        self._safe_issue_failed(source_number, "label_create", message)
+            # Slice C fidelity: wrap the body with the migration
+            # attribution block. Label failures above never block issue
+            # creation.
+            source = str(getattr(self.repo, "source", ""))
+            user = issue.get("user")
+            author = str(user.get("login", "")) if isinstance(user, dict) else ""
+            created_at = str(issue.get("created_at") or "")
+            date = created_at.split("T")[0]
+            body = format_issue_body(
+                source, source_number, author, date, issue.get("body")
+            )
+            github_number = int(self.github.create_issue(title, body, labels_arg))
+            time.sleep(_ISSUE_MUTATION_PAUSE_SECONDS)
+        except Exception as exc:  # noqa: BLE001 — issue create failure
+            result.issues_failed += 1
+            message = str(exc) or exc.__class__.__name__
+            result.failures.append(
+                IssueFailure(
+                    kind="issue_create",
+                    source_number=source_number,
+                    message=message,
+                    step="create",
+                )
+            )
+            self._safe_issue_failed(source_number, "issue_create", message)
+            return
+
+        # S3: post comments. Slice D fidelity: comments are fetched
+        # unconditionally via ``list_comments`` for every issue (the
+        # issue payload's ``comments`` field is stale), then filtered
+        # to the real API shape. Per-comment failures do not abort the
+        # issue; the checkpoint still advances to S5 because the
+        # issue itself was created successfully.
+        try:
+            comments = self.codeberg.list_comments(issue_id=source_number)
+        except Exception as exc:  # noqa: BLE001 — comment fetch failure
+            result.issues_failed += 1
+            message = str(exc) or exc.__class__.__name__
+            result.failures.append(
+                IssueFailure(
+                    kind="comment",
+                    source_number=source_number,
+                    message=message,
+                    step="fetch_comments",
+                )
+            )
+            self._safe_issue_failed(source_number, "comment", message)
+            return
+
+        for comment_index, comment in enumerate(comments or []):
+            result.comments_attempted += 1
+            ctype = comment.get("type")
+            author = (comment.get("user") or {}).get("username")
+            body = comment.get("body")
+            if ctype is not None and ctype != "Comment":
+                self._safe_comment_skipped(source_number, "non-Comment type")
+                continue
+            if not body:
+                self._safe_comment_skipped(source_number, "empty or missing body")
+                continue
+            if not author:
+                self._safe_comment_skipped(source_number, "missing author")
+                continue
+            try:
+                comment_body = format_comment_body(
+                    author,
+                    str(comment.get("created_at") or "").split("T")[0],
+                    body,
+                )
+                response = self.github.create_comment(github_number, comment_body)
+            except Exception as exc:  # noqa: BLE001 — comment failure
+                result.comments_failed += 1
+                message = str(exc) or exc.__class__.__name__
+                result.failures.append(
+                    IssueFailure(
+                        kind="comment",
+                        source_number=source_number,
+                        message=message,
+                        step="comment",
+                    )
+                )
+                self._safe_issue_failed(source_number, "comment", message)
+                continue
+
+            result.comments_succeeded += 1
+            self._safe_record_comment(source_number, comment_index, response)
+            time.sleep(_ISSUE_MUTATION_PAUSE_SECONDS)
+
+        # S4: close if the source issue was closed. Failures here are
+        # warnings; the issue itself is still considered succeeded.
+        source_closed = bool(issue.get("closed") or issue.get("state") == "closed")
+        if source_closed:
+            close = getattr(self.github, "close_issue", None)
+            if callable(close):
+                try:
+                    close(github_number)
+                    time.sleep(_ISSUE_MUTATION_PAUSE_SECONDS)
+                except Exception as exc:  # noqa: BLE001 — close warning
+                    message = str(exc) or exc.__class__.__name__
+                    result.failures.append(
+                        IssueFailure(
+                            kind="close_failed",
+                            source_number=source_number,
+                            message=message,
+                            step="close",
+                        )
+                    )
+                    self._safe_issue_failed(source_number, "close_failed", message)
+
+        # S5: checkpoint and report success.
+        self._safe_record_issue(source_number, github_number)
+        result.issues_succeeded += 1
+        self._safe_issue_succeeded(source_number, github_number)
+
+    # --- concrete StateStore helpers (narrow seam) ---------------------------
+
+    def _is_concrete_state_store(self) -> bool:
+        """Whether the injected state seam is the concrete StateStore."""
+        load_fn = getattr(self.state, "load", None)
+        save_fn = getattr(self.state, "save", None)
+        return callable(load_fn) and callable(save_fn)
+
+    def _ensure_concrete_state_loaded(self) -> None:
+        """Load existing StateStore checkpoint at run start when available.
+
+        Populates the orchestrator-owned in-memory migrated map and cached
+        repo_created/git_pushed fields. This is the resume source for the
+        concrete path; legacy fakes continue to use already_migrated.
+        Idempotent within a single orchestrator instance.
+        """
+        if self._concrete_state_loaded:
+            return
+        if not self._is_concrete_state_store():
+            self._concrete_state_loaded = True
+            return
+        # load() -> dict with keys source/target/repo_created/git_pushed/migrated
+        data = (
+            self.state.load()
+        )  # let StateLoadError propagate; fresh file returns defaults
+        if not isinstance(data, dict):
+            self._concrete_state_loaded = True
+            return
+        raw_migrated = data.get("migrated", {})
+        if isinstance(raw_migrated, dict):
+            self._concrete_migrated = dict(raw_migrated)
+        else:
+            self._concrete_migrated = {}
+        self._concrete_repo_created = bool(data.get("repo_created", False))
+        self._concrete_git_pushed = bool(data.get("git_pushed", False))
+        self._concrete_state_loaded = True
+
+    # --- collaborator wrappers (duck-typed) ----------------------------------
+
+    def _list_issues(self) -> list[dict[str, Any]]:
+        """Read the source issue list from the Codeberg seam."""
+        result = self.codeberg.list_issues()
+        return list(result)
+
+    def _already_migrated(self, source_number: int) -> bool:
+        """Whether ``source_number`` is already checkpointed in the state seam."""
+        # Concrete StateStore path: use orchestrator-owned migrated map
+        # populated at run start via StateStore.load(). Narrow seam: only
+        # when load/save are present do we consult the concrete map;
+        # legacy fakes keep using already_migrated.
+        if self._is_concrete_state_store():
+            self._ensure_concrete_state_loaded()
+            return source_number in self._concrete_migrated
+        already = getattr(self.state, "already_migrated", None)
+        if not callable(already):
+            return False
+        try:
+            return bool(already(source_number))
+        except Exception:  # noqa: BLE001 — defensive: never abort resume
+            return False
+
+    def _safe_record_issue(self, source_number: int, github_number: int) -> None:
+        """Forward ``record_issue`` to the state seam, swallowing errors."""
+        # Concrete StateStore path: record in orchestrator-owned in-memory
+        # state and persist via StateStore.save(repo_created, git_pushed,
+        # migrated), preserving repo_created/git_pushed as currently known.
+        if self._is_concrete_state_store():
+            self._ensure_concrete_state_loaded()
+            self._concrete_migrated[source_number] = github_number
+            save_fn = getattr(self.state, "save", None)
+            if not callable(save_fn):
+                return
+            try:
+                save_fn(
+                    self._concrete_repo_created,
+                    self._concrete_git_pushed,
+                    dict(self._concrete_migrated),
+                )
+            except Exception:  # noqa: BLE001 — state seam is best-effort
+                return
+            return
+        record = getattr(self.state, "record_issue", None)
+        if not callable(record):
+            return
+        try:
+            record(source_number, github_number)
+        except Exception:  # noqa: BLE001 — state seam is best-effort
+            return
+
+    def _safe_record_comment(
+        self, source_number: int, comment_index: int, response: Any
+    ) -> None:
+        """Forward ``record_comment`` to the state seam, swallowing errors."""
+        record = getattr(self.state, "record_comment", None)
+        if not callable(record):
+            return
+        try:
+            github_comment_id = self._extract_comment_id(response)
+            record(source_number, comment_index, github_comment_id)
+        except Exception:  # noqa: BLE001 — state seam is best-effort
+            return
+
+    @staticmethod
+    def _extract_comment_id(response: Any) -> int:
+        """Best-effort extraction of a comment id from a create response."""
+        if isinstance(response, dict):
+            raw = response.get("id", 0)
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return 0
+        try:
+            return int(response)
+        except (TypeError, ValueError):
+            return 0
+
+    def _safe_issue_started(self, source_number: int) -> None:
+        started = getattr(self.reporter, "issue_started", None)
+        if not callable(started):
+            return
+        try:
+            started(source_number)
+        except Exception:  # noqa: BLE001 — reporter is best-effort
+            return
+
+    def _safe_issue_succeeded(self, source_number: int, github_number: int) -> None:
+        succeeded = getattr(self.reporter, "issue_succeeded", None)
+        if not callable(succeeded):
+            return
+        try:
+            succeeded(source_number, github_number)
+        except Exception:  # noqa: BLE001 — reporter is best-effort
+            return
+
+    def _safe_issue_failed(self, source_number: int, kind: str, message: str) -> None:
+        failed = getattr(self.reporter, "issue_failed", None)
+        if not callable(failed):
+            return
+        try:
+            failed(source_number, kind, message)
+        except Exception:  # noqa: BLE001 — reporter is best-effort
+            return
+
+    def _safe_issue_skipped(self, source_number: int) -> None:
+        skipped = getattr(self.reporter, "issue_skipped", None)
+        if not callable(skipped):
+            return
+        try:
+            skipped(source_number)
+        except Exception:  # noqa: BLE001 — reporter is best-effort
+            return
+
+    def _safe_comment_skipped(self, source_number: int, reason: str) -> None:
+        skipped = getattr(self.reporter, "comment_skipped", None)
+        if not callable(skipped):
+            return
+        try:
+            skipped(source_number, reason)
+        except Exception:  # noqa: BLE001 — reporter is best-effort
+            return
+
+    def _safe_git_phase_finished(self, status: str) -> None:
+        finished = getattr(self.reporter, "git_phase_finished", None)
+        if not callable(finished):
+            return
+        try:
+            finished(status)
+        except Exception:  # noqa: BLE001 — reporter is best-effort
+            return
+
+
+__all__ = [
+    "DEFAULT_LABEL_COLOR",
+    "MigrationOrchestrator",
+]

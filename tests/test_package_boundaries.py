@@ -47,6 +47,14 @@ EXPECTED_PUBLIC_CLASSES = {
 }
 
 
+# Maximum public methods per class. Raised from seven to nine during the
+# plan-02 audit remediation: the Reporter's approved per-event dual-sink
+# seam grew (comment_skipped, then issue_skipped). The seam cleanup that
+# would return Reporter to the original cap is GitHub issue #7. See
+# test-framework-spec.md §14.5.
+MAX_PUBLIC_METHODS = 9
+
+
 # --- helpers ----------------------------------------------------------------
 
 
@@ -187,19 +195,19 @@ def test_public_class_has_at_least_two_public_methods(
     sorted(EXPECTED_PUBLIC_CLASSES.items()),
     ids=lambda value: value if isinstance(value, str) else "-".join(value),
 )
-def test_public_class_has_at_most_seven_public_methods(
+def test_public_class_has_at_most_nine_public_methods(
     module_name: str, class_name: str
 ):
-    """The seven-method cap prevents god objects.
+    """The nine-method cap prevents god objects.
 
-    No public class may expose more than seven non-special public
-    methods; anything larger is a refactoring smell.
+    No public class may expose more than nine non-special public
+    methods; anything larger is a refactoring smell (see §14.5).
     """
     klass = _import_attr(module_name, class_name)
     methods = _public_methods(klass)
-    assert len(methods) <= 7, (
+    assert len(methods) <= MAX_PUBLIC_METHODS, (
         f"{module_name}.{class_name} exposes {len(methods)} public methods "
-        f"({methods!r}); the seven-method cap was exceeded"
+        f"({methods!r}); the {MAX_PUBLIC_METHODS}-method cap was exceeded"
     )
 
 

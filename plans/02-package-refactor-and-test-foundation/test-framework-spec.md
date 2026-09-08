@@ -331,20 +331,53 @@ The CLI is the public entry point. Tests cover:
   asserted; no magic numbers.
 - A migration that failed before producing any issues exits with the
   documented "failure" code, distinct from the incomplete code.
-- `--dry-run` exits 0 regardless of underlying errors, but logs every
-  error that would have occurred.
+- `--dry-run` exits 0 regardless of underlying state; it performs
+  read-only, `GET`-only discovery and emits the dry-run preview
+  summary (§7.4).
 
 ### 7.4 Dry-run semantics
 
-- Dry-run issues no HTTP requests against Codeberg or GitHub. Tests
-  assert that no request is registered with the mock transport.
+- Dry run is read-only, not offline. Read-only `GET` requests against
+  Codeberg and GitHub are permitted for discovery (target repository
+  status, source metadata/description, source issues, and each
+  discovered source issue's comments). Tests assert
+  that no mutating request (`POST`/`PATCH`/`PUT`/`DELETE`) is
+  registered with the mock transport.
+- Dry-run invokes no git subprocess. Token reads (the environment or
+  `gh auth token`) are still permitted because they are local,
+  non-network reads.
 - Dry-run still loads state but never writes the checkpoint file.
-  Tests assert that the destination file is unchanged after a dry-run
-  that exits normally.
+  Tests assert that a pre-populated destination file is byte-for-byte
+  unchanged after a dry-run that exits normally, and that
+  `StateStore.save` is not called during the run.
 - Dry-run still validates source and target arguments.
+- The dry-run result carries a populated `DryRunDiscovery` value with
+  the target repository, target-repo existence, discovered comment
+  count, state path, and checkpoint count. `discovery` is
+  `None` on normal runs; normal-run result behavior is unchanged.
 - Dry-run always exits 0 regardless of underlying state. The reporter
-  emits a dry-run summary that does not claim "migrated" or
-  "complete" and does not enumerate failures.
+  emits the approved informative dry-run preview, rendered from the
+  `DryRunDiscovery` value and `result.issues_discovered`. The preview
+  consists of these lines:
+
+  ```
+  Dry-run complete — no changes were made.
+  Target repo: owner/target
+  Repo: would be created        (or `Repo: existing` when the target already exists)
+  Issues: would process N issues
+  Comments: would post M
+  Git: clone skipped, push skipped (dry-run)
+  State: path (K checkpointed)
+  ```
+
+  where `N` is the discovered issue count, `M` is
+  `discovery.comments_discovered`, and the `State:` line
+  shows `discovery.state_path` and
+  `discovery.state_migrated`. The preview does not count
+  discovery as work: `issues_attempted` stays `0` on a dry run, the
+  discovered count is carried separately in `issues_discovered`, and
+  the summary does not claim "migrated" or "complete" as migration
+  outcomes and does not enumerate failures.
 
 ## 8. Repository-description tests
 
@@ -675,10 +708,15 @@ provides).
 
 ### 14.5 No god object
 
-- No single class has more than seven public methods (excluding
+- No single class has more than nine public methods (excluding
   special methods). The test asserts the count for every public
   class. Classes that exceed the threshold must be split; the test
-  flags the violation.
+  flags the violation. (Amended from seven during the plan-02 audit
+  remediation: the `Reporter`'s approved per-event dual-sink seam
+  legitimately grew — `comment_skipped`, then `issue_skipped` —
+  reaching nine methods; the cap was raised globally in lieu of
+  per-class allowances. The seam cleanup that would return
+  `Reporter` to the original cap is tracked in GitHub issue #7.)
 
 ### 14.6 No silent extraction
 

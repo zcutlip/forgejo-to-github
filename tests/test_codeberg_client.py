@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+
 from forgejo_to_github.codeberg import CodebergClient
 
 # ---------------------------------------------------------------------------
@@ -70,6 +71,7 @@ class FakeRequest:
     url: str
     params: dict[str, Any] | None = None
     headers: dict[str, str] | None = None
+    timeout: float | None = None
 
 
 class FakeTransport:
@@ -90,9 +92,13 @@ class FakeTransport:
         *,
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        json_body: Any | None = None,
+        timeout: float | None = None,
     ) -> FakeResponse:
         self.calls.append(
-            FakeRequest(method=method, url=url, params=params, headers=headers)
+            FakeRequest(
+                method=method, url=url, params=params, headers=headers, timeout=timeout
+            )
         )
         if not self._scripted:
             raise AssertionError(
@@ -224,14 +230,13 @@ def test_list_issues_sends_token_authorization_when_configured() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_list_comments_passes_issue_id_param_and_paginates() -> None:
+def test_list_comments_makes_single_request_without_pagination_params() -> None:
     transport = FakeTransport(
         responses=[
             FakeResponse(
                 status_code=200,
                 json_payload=[{"id": 10}, {"id": 11}],
             ),
-            FakeResponse(status_code=200, json_payload=[]),
         ]
     )
     client = _client(transport)
@@ -239,16 +244,32 @@ def test_list_comments_passes_issue_id_param_and_paginates() -> None:
     comments = list(client.list_comments(issue_id=42))
 
     assert [c["id"] for c in comments] == [10, 11]
-    assert len(transport.calls) == 2
+    assert len(transport.calls) == 1
 
     first = transport.calls[0]
     assert first.method == "GET"
     assert (
         first.url == "https://codeberg.org/api/v1/repos/acme/widgets/issues/42/comments"
     )
-    assert first.params is not None
-    assert first.params.get("issue_id") == 42
-    assert first.params.get("page") == 1
+    assert first.params is None
+
+
+def test_list_comments_rejects_total_count_mismatch() -> None:
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(
+                status_code=200,
+                json_payload=[{"id": 10}],
+                headers={"X-Total-Count": "2"},
+            )
+        ]
+    )
+    client = _client(transport)
+
+    from forgejo_to_github.codeberg import CodebergTransportError
+
+    with pytest.raises(CodebergTransportError):
+        list(client.list_comments(issue_id=42))
 
 
 # ---------------------------------------------------------------------------
@@ -373,3 +394,48 @@ def test_429_without_retry_after_header_still_raises_rate_limit_error() -> None:
 
     with pytest.raises(CodebergRateLimitError):
         client.get_issue(issue_number=1)
+
+
+# Error message correctness (append-only)
+
+
+def test_codeberg_get_issue_rate_limit_message_says_codeberg() -> None:
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(
+                status_code=429,
+                json_payload={"message": "rate limited"},
+                headers={"Retry-After": "30"},
+            )
+        ]
+    )
+    client = _client(transport)
+
+    from forgejo_to_github.codeberg import CodebergRateLimitError
+
+    with pytest.raises(CodebergRateLimitError) as excinfo:
+        client.get_issue(issue_number=1)
+
+    text = str(excinfo.value)
+    assert "Codeberg" in text, f"rate-limit message missing 'Codeberg': {text!r}"
+    assert "Codehub" not in text, f"rate-limit message typo 'Codehub' found: {text!r}"
+
+
+# HTTP timeout regression (append-only)
+
+
+def test_codeberg_client_transport_call_includes_timeout() -> None:
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(
+                status_code=200,
+                json_payload={"id": 1, "number": 7, "title": "hi"},
+            )
+        ]
+    )
+    client = _client(transport)
+
+    client.get_issue(issue_number=7)
+
+    assert len(transport.calls) == 1
+    assert transport.calls[0].timeout == 30

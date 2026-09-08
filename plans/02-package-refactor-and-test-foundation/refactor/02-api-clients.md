@@ -97,7 +97,7 @@ Methods:
 | Method | Returns | HTTP contract |
 |--------|---------|---------------|
 | `list_issues(state: str = "all") -> list[dict]` | list of parsed issue dicts sorted ascending by `created_at` | `GET /repos/{owner}/{repo}/issues?state={state}&type=issues&page=N&limit=50`; paginates until an empty page is returned. |
-| `list_comments(issue_id: int) -> list[dict]` | list of parsed comment dicts in API order (chronological) | `GET /repos/{owner}/{repo}/issues/{issue_id}/comments?issue_id={issue_id}&page=N`; paginates until empty page. |
+| `list_comments(issue_id: int) -> list[dict]` | list of parsed comment dicts in API order (chronological) | Exactly one `GET /repos/{owner}/{repo}/issues/{issue_id}/comments` with no query parameters and `timeout=self._timeout`. The decoded body must be a JSON list. If a parsable `X-Total-Count` response header differs from the returned list length, raise `CodebergTransportError`; the existing status/error mapping otherwise applies. |
 | `get_issue(issue_number: int) -> dict` | parsed dict | `GET /repos/{owner}/{repo}/issues/{issue_number}` |
 | `get_repository_description() -> str` | description string. **Empty string** when the field is missing or `null`. The orchestrator is responsible for the "Migrated from Codeberg" fallback; the client does not invent a default. | `GET /repos/{owner}/{repo}`; returns the `description` field, or `""` if missing/null. |
 
@@ -159,21 +159,37 @@ client applies them. Earlier rules win:
 | # | Status / condition | Translated to |
 |---|--------------------|---------------|
 | 1 | 2xx with valid payload | normal return |
-| 2 | 429 | `GitHubRateLimitError` with `retry_after: int | None`. Retried up to 3 times within the client before giving up. |
-| 3 | 403 with `X-RateLimit-Remaining: 0` (header present and zero) | `GitHubRateLimitError` carrying `reset: int | None`. Retried up to 3 times within the client. |
-| 4 | 401 | `GitHubAuthError` |
-| 5 | 403 (other than 3 above) | `GitHubAuthError` |
-| 6 | 422 | `GitHubValidationError` carrying parsed `errors` from the response body |
-| 7 | 5xx | `GitHubTransportError` |
-| 8 | Underlying transport raises | `GitHubTransportError` |
+| 2 | 429, or 403 with `X-RateLimit-Remaining: 0` (header present and zero) | `GitHubRateLimitError` with `retry_after: int \| None` and/or `reset: int \| None`. Both signals are retried up to 3 **total** attempts within the client before giving up (one initial request plus up to two retries). |
+| 3 | 401 | `GitHubAuthError` |
+| 4 | 403 (other than the rate-limit signal in 2 above) | `GitHubAuthError` |
+| 5 | 422 | `GitHubValidationError` carrying parsed `errors` from the response body |
+| 6 | 5xx | `GitHubTransportError` |
+| 7 | Underlying transport raises | `GitHubTransportError` |
 
-The retry/backoff behavior for 429 / 403-with-zero-remaining lives
-inside the GitHub client, not the orchestrator. After three attempts,
-the client raises `GitHubRateLimitError`. The test
+The retry/backoff behavior for rate-limited responses (429, or 403 with
+`X-RateLimit-Remaining: 0`) lives inside the GitHub client, not the
+orchestrator. Both signals are retried up to 3 total attempts; on the
+third rate-limited response the client raises `GitHubRateLimitError`.
+The tests
 `test_rate_limit_429_is_retried_then_terminates_with_rate_limit_error`
-asserts that exactly three POST attempts are issued before the client
-gives up. The retry policy between attempts is implementation-defined
+and
+`test_403_with_zero_rate_limit_remaining_retries_then_raises`
+each assert exactly three POST attempts before the client gives up.
+The retry policy between attempts is implementation-defined
 (but bounded by the 3-attempt cap) and not part of the public contract.
+Delay comes from `Retry-After` (or `X-RateLimit-Reset - now` when
+`Retry-After` is absent) plus additive jitter
+(`delay + random.uniform(0, _JITTER_SECONDS)`, `_JITTER_SECONDS = 1.0`).
+Amendment (Slice B remediation, user-approved): an earlier amendment to
+this section codified "403 raises immediately"; that codified a
+regression against the pre-refactor baseline (`gh_request` retried both
+signals) and is reverted here.
+
+Before returning from a request whose response carries
+`X-RateLimit-Remaining` below 10, the client proactively sleeps 2
+seconds (primary-rate-limit safeguard, restored from the pre-refactor
+`gh_request`). `test_github_client_proactive_sleep_when_remaining_low`
+locks this.
 
 Headers (production default adapter only; the test fake observes
 whatever headers the client constructs):
@@ -240,10 +256,10 @@ preserved are:
    when the target repo already exists, an explicit `--description`
    does not cause a `update_repository_description` call.
 8. `test_dry_run_does_not_create_repo_or_mutate_description` — under
-   `--dry-run`, no HTTP and no state writes.
+   `--dry-run`, no mutating HTTP (GET allowed) and no state writes.
 9. `test_dry_run_does_not_create_repo_when_explicit_description_given`
-   — under `--dry-run` with an explicit `--description`, no HTTP and
-   no state writes.
+   — under `--dry-run` with an explicit `--description`, no mutating
+   HTTP (GET allowed) and no state writes.
 
 ## 4. Invariants
 
@@ -263,7 +279,7 @@ preserved are:
   `test_transport_error_does_not_leak_token` (Codeberg) and by the
   redaction discipline implicit in
   `test_rate_limit_429_is_retried_then_terminates_with_rate_limit_error`
-  and `test_403_with_zero_rate_limit_remaining_raises_rate_limit_error`
+  and `test_403_with_zero_rate_limit_remaining_retries_then_raises`
   (GitHub). The implementation must apply redaction before raising.
 - **No dependency on the orchestrator or reporter.** The clients know
   nothing about `MigrationOrchestrator`, `Reporter`, or `StateStore`.
@@ -290,7 +306,11 @@ preserved are:
 - **`f2gh.py` is not modified in this stage.** The legacy module-level
   functions stay in place; tests in `tests/test_api_clients.py` and
   `tests/test_repository_description.py` continue to pass against the
-  legacy functions. Removal happens in stage 06.
+  legacy functions, with one deliberate Slice H exception:
+  `tests/test_api_clients.py::test_fetch_codeberg_comments_uses_issue_index_in_path`
+  is amended to preserve its endpoint-path assertion while asserting
+  that no `issue_id` query parameter is sent, matching old `main`.
+  Removal happens in stage 06.
 - **Public test surface is the new clients.** The tests in
   `tests/test_codeberg_client.py` and `tests/test_github_client.py`
   exercise the new public surface. They are the contract.
@@ -312,7 +332,9 @@ Codeberg:
 - `tests/test_codeberg_client.py::test_list_issues_sets_json_accept_and_user_agent`
 - `tests/test_codeberg_client.py::test_list_issues_omits_auth_header_when_no_token`
 - `tests/test_codeberg_client.py::test_list_issues_sends_token_authorization_when_configured`
-- `tests/test_codeberg_client.py::test_list_comments_passes_issue_id_param_and_paginates`
+- `tests/test_codeberg_client.py::test_list_comments_makes_single_request_without_pagination_params` (to be added in Slice H RED)
+- `tests/test_codeberg_client.py::test_list_comments_rejects_total_count_mismatch` (to be added in Slice H RED)
+- Pending amendment in Slice H RED: `tests/test_codeberg_client.py::test_list_comments_passes_issue_id_param_and_paginates` encodes the removed pagination behavior and is superseded by the two tests above.
 - `tests/test_codeberg_client.py::test_get_issue_returns_parsed_payload`
 - `tests/test_codeberg_client.py::test_get_issue_404_raises_not_found_with_context`
 - `tests/test_codeberg_client.py::test_get_issue_auth_errors_raise_codeberg_auth_error`
@@ -333,7 +355,9 @@ GitHub:
 - `tests/test_github_client.py::test_ensure_label_does_not_repost_when_label_already_exists`
 - `tests/test_github_client.py::test_create_issue_422_raises_validation_error_with_messages`
 - `tests/test_github_client.py::test_create_issue_auth_errors_raise_github_auth_error`
-- `tests/test_github_client.py::test_403_with_zero_rate_limit_remaining_raises_rate_limit_error`
+- `tests/test_github_client.py::test_403_with_zero_rate_limit_remaining_retries_then_raises`
+- `tests/test_github_client.py::test_github_client_proactive_sleep_when_remaining_low`
+- `tests/test_github_client.py::test_github_client_retry_includes_jitter`
 - `tests/test_github_client.py::test_rate_limit_429_is_retried_then_terminates_with_rate_limit_error`
 
 Package boundary:
@@ -345,7 +369,7 @@ Package boundary:
   (same)
 - `tests/test_package_boundaries.py::test_public_class_has_at_least_two_public_methods`
   (same)
-- `tests/test_package_boundaries.py::test_public_class_has_at_most_seven_public_methods`
+- `tests/test_package_boundaries.py::test_public_class_has_at_most_nine_public_methods`
   (same)
 
 Legacy parity (must remain green throughout this stage):

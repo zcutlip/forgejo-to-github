@@ -25,11 +25,13 @@ from __future__ import annotations
 
 import argparse
 import sys
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 import f2gh
+from forgejo_to_github.__about__ import __version__
+from forgejo_to_github.about import about
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -183,10 +185,17 @@ def test_main_is_callable_entrypoint() -> None:
     assert callable(f2gh.main)
 
 
-def test_main_invokes_parse_args_then_migrate() -> None:
-    """``main`` must call ``parse_args`` and forward the result to ``migrate``.
+def test_main_invokes_parse_args_then_orchestrator_flow() -> None:
+    """Approved API-alignment amendment (stage-06) — not a weakening.
 
-    No network or subprocess is invoked: ``migrate`` is patched.
+    Replaces the obsolete ``migrate`` seam (``test_main_invokes_parse_args_then_migrate``)
+    with the approved observable flow from ``f2gh.main``:
+
+        parse_args() -> _build_orchestrator(args) -> orchestrator.run()
+        -> reporter.render_final(result) -> reporter.exit_outcome(result) -> sys.exit(code)
+
+    Verifies each hop with injected fakes/mocks; no environment, network, or
+    subprocess is touched. Renamed/re-written with explicit user permission.
     """
     sentinel_args = argparse.Namespace(
         source="owner/source",
@@ -197,23 +206,39 @@ def test_main_invokes_parse_args_then_migrate() -> None:
         public=False,
         description="custom",
     )
+    sentinel_result: object = object()
+    sentinel_exit_code = 42
+
+    fake_reporter = Mock()
+    fake_reporter.exit_outcome.return_value = sentinel_exit_code
+
+    fake_orchestrator = Mock()
+    fake_orchestrator.run.return_value = sentinel_result
+    fake_orchestrator.reporter = fake_reporter
 
     with (
         patch.object(f2gh, "parse_args", return_value=sentinel_args) as mock_parse,
-        patch.object(f2gh, "migrate") as mock_migrate,
+        patch.object(
+            f2gh, "_build_orchestrator", return_value=fake_orchestrator
+        ) as mock_build,
+        patch.object(
+            f2gh.sys, "exit", side_effect=SystemExit(sentinel_exit_code)
+        ) as mock_exit,
+        pytest.raises(SystemExit) as exc_info,
     ):
         f2gh.main()
 
+    # Exits with the code returned by reporter.exit_outcome(result).
+    assert exc_info.value.code == sentinel_exit_code
+    mock_exit.assert_called_once_with(sentinel_exit_code)
+
+    # Observable call graph — each collaborator invoked exactly once with the
+    # expected argument.
     mock_parse.assert_called_once_with()
-    mock_migrate.assert_called_once_with(
-        source="owner/source",
-        target="owner/target",
-        dry_run=True,
-        yes=True,
-        skip_git=True,
-        public=False,
-        description="custom",
-    )
+    mock_build.assert_called_once_with(sentinel_args)
+    fake_orchestrator.run.assert_called_once_with()
+    fake_reporter.render_final.assert_called_once_with(sentinel_result)
+    fake_reporter.exit_outcome.assert_called_once_with(sentinel_result)
 
 
 def test_parse_args_returns_namespace_with_expected_attributes(
@@ -245,3 +270,81 @@ def test_parse_args_returns_namespace_with_expected_attributes(
         "expected attributes missing from Namespace: "
         + repr(expected_attrs - set(vars(args)))
     )
+
+
+# ---------------------------------------------------------------------------
+# 6. CLI prompter helper
+# ---------------------------------------------------------------------------
+
+
+def test_cli_prompter_bypasses_when_yes_flag_set() -> None:
+    """The CLI prompter helper returns True without reading stdin when yes=True.
+
+    ``f2gh._make_prompter`` constructs a ``prompter(prompt, default) -> bool``
+    callable. When ``Repository.yes`` is True, the returned callable must
+    immediately return True without prompting — no stdin access.
+    """
+    from forgejo_to_github.domain import Repository
+
+    repo = Repository(source="owner/source", target="owner/target", yes=True)
+    prompter = f2gh._make_prompter(repo)
+
+    # A fake stdin that would fail if read.
+    sentinel = object()
+    with patch.object(sys, "stdin", sentinel):
+        result = prompter("Proceed?", False)
+
+    assert result is True, (
+        f"yes=True must return True without prompting; got {result!r}"
+    )
+
+
+def test_cli_prompter_reads_stdin_when_yes_flag_unset() -> None:
+    """The CLI prompter helper reads stdin and returns True for 'yes'.
+
+    When ``Repository.yes`` is False, the returned callable must prompt
+    via ``input()`` and return True when the user types "yes".
+    """
+    from forgejo_to_github.domain import Repository
+
+    repo = Repository(source="owner/source", target="owner/target", yes=False)
+    prompter = f2gh._make_prompter(repo)
+
+    with patch("builtins.input", return_value="yes"):
+        result = prompter("Proceed?", False)
+
+    assert result is True, f"input 'yes' must return True; got {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# 7. --version
+# ---------------------------------------------------------------------------
+
+
+def test_parse_args_version_flag_prints_version_and_exits_zero(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--version`` must exit 0 and print the canonical about string to stdout."""
+    with pytest.raises(SystemExit) as exc_info:
+        _run_parse_args(["--version"])
+
+    assert exc_info.value.code == 0
+
+    captured = capsys.readouterr()
+    assert captured.out, "expected --version text on stdout"
+    assert about() in captured.out
+    assert __version__ in captured.out
+
+
+def test_help_description_matches_version_string(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--help`` description and ``--version`` output share the canonical string."""
+    with pytest.raises(SystemExit) as exc_info:
+        _run_parse_args(["--help"])
+
+    assert exc_info.value.code == 0
+
+    captured = capsys.readouterr()
+    assert captured.out, "expected --help text on stdout"
+    assert about() in captured.out
