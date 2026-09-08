@@ -230,14 +230,13 @@ def test_list_issues_sends_token_authorization_when_configured() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_list_comments_passes_issue_id_param_and_paginates() -> None:
+def test_list_comments_makes_single_request_without_pagination_params() -> None:
     transport = FakeTransport(
         responses=[
             FakeResponse(
                 status_code=200,
                 json_payload=[{"id": 10}, {"id": 11}],
             ),
-            FakeResponse(status_code=200, json_payload=[]),
         ]
     )
     client = _client(transport)
@@ -245,16 +244,32 @@ def test_list_comments_passes_issue_id_param_and_paginates() -> None:
     comments = list(client.list_comments(issue_id=42))
 
     assert [c["id"] for c in comments] == [10, 11]
-    assert len(transport.calls) == 2
+    assert len(transport.calls) == 1
 
     first = transport.calls[0]
     assert first.method == "GET"
     assert (
         first.url == "https://codeberg.org/api/v1/repos/acme/widgets/issues/42/comments"
     )
-    assert first.params is not None
-    assert first.params.get("issue_id") == 42
-    assert first.params.get("page") == 1
+    assert first.params is None
+
+
+def test_list_comments_rejects_total_count_mismatch() -> None:
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(
+                status_code=200,
+                json_payload=[{"id": 10}],
+                headers={"X-Total-Count": "2"},
+            )
+        ]
+    )
+    client = _client(transport)
+
+    from forgejo_to_github.codeberg import CodebergTransportError
+
+    with pytest.raises(CodebergTransportError):
+        list(client.list_comments(issue_id=42))
 
 
 # ---------------------------------------------------------------------------

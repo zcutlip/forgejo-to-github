@@ -224,8 +224,7 @@ def test_fetch_codeberg_comments_uses_issue_index_in_path() -> None:
         transport.calls[0].url
         == "https://codeberg.org/api/v1/repos/owner/source/issues/42/comments"
     )
-    assert transport.calls[0].params is not None
-    assert transport.calls[0].params["issue_id"] == 42
+    assert transport.calls[0].params is None
 
 
 # ---------------------------------------------------------------------------
