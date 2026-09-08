@@ -407,9 +407,10 @@ begins, and they are part of the Slice A stop report.
     attribution block and the original comment body.
   - `create_issue` is called with `labels=["bug", "feature"]` and
     `ensure_label` is called twice with the same names.
-  - The repo is created, then the description is set from the
-    source (or from the fallback), then the Git phase runs, then
-    the issues are migrated in `created_at` order.
+  - The repo is created (with the description folded into the
+    `create_repository` payload per §3.8 — no separate
+    `update_repository_description` call), then the Git phase runs,
+    then the issues are migrated in `created_at` order.
   - `result.issues_attempted == 1` (the one non-resumed issue),
     `result.issues_succeeded == 1`, `result.comments_attempted == 4`
     (three good + one malformed), `result.comments_succeeded == 3`.
