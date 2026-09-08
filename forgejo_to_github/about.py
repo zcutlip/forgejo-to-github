@@ -11,4 +11,4 @@ from forgejo_to_github.__about__ import __summary__, __title__, __version__
 
 def about() -> str:
     """Return the canonical ``title: summary version X`` string."""
-    return f"{__title__}: {__summary__} version {__version__}"
+    return f"{__title__}: {__summary__}. version {__version__}"
