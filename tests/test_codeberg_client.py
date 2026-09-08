@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+
 from forgejo_to_github.codeberg import CodebergClient
 
 # ---------------------------------------------------------------------------
@@ -70,6 +71,7 @@ class FakeRequest:
     url: str
     params: dict[str, Any] | None = None
     headers: dict[str, str] | None = None
+    timeout: float | None = None
 
 
 class FakeTransport:
@@ -90,9 +92,13 @@ class FakeTransport:
         *,
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        json_body: Any | None = None,
+        timeout: float | None = None,
     ) -> FakeResponse:
         self.calls.append(
-            FakeRequest(method=method, url=url, params=params, headers=headers)
+            FakeRequest(
+                method=method, url=url, params=params, headers=headers, timeout=timeout
+            )
         )
         if not self._scripted:
             raise AssertionError(
@@ -398,3 +404,23 @@ def test_codeberg_get_issue_rate_limit_message_says_codeberg() -> None:
     text = str(excinfo.value)
     assert "Codeberg" in text, f"rate-limit message missing 'Codeberg': {text!r}"
     assert "Codehub" not in text, f"rate-limit message typo 'Codehub' found: {text!r}"
+
+
+# HTTP timeout regression (append-only)
+
+
+def test_codeberg_client_transport_call_includes_timeout() -> None:
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(
+                status_code=200,
+                json_payload={"id": 1, "number": 7, "title": "hi"},
+            )
+        ]
+    )
+    client = _client(transport)
+
+    client.get_issue(issue_number=7)
+
+    assert len(transport.calls) == 1
+    assert transport.calls[0].timeout == 30

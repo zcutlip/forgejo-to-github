@@ -206,9 +206,7 @@ class _FakeState:
         self, repo_created: bool, git_pushed: bool, migrated: dict[int, int]
     ) -> None:
         """Record-only ``StateStore.save`` seam (never persists)."""
-        self.save_calls.append(
-            (bool(repo_created), bool(git_pushed), dict(migrated))
-        )
+        self.save_calls.append((bool(repo_created), bool(git_pushed), dict(migrated)))
 
 
 class _FakeReport:
@@ -1993,8 +1991,7 @@ def test_orchestrator_fetches_comments_via_codeberg_client() -> None:
         f"posted={posted!r}"
     )
     assert not any("comment 0 for 1" in body for body in posted), (
-        "stale payload comments must not be posted; "
-        f"posted={posted!r}"
+        f"stale payload comments must not be posted; posted={posted!r}"
     )
 
 
@@ -2057,12 +2054,10 @@ def test_orchestrator_counts_skipped_malformed_comments() -> None:
     result = orch.run()
 
     assert result.comments_attempted == 3, (
-        "malformed comments count as attempted; "
-        f"got {result.comments_attempted!r}"
+        f"malformed comments count as attempted; got {result.comments_attempted!r}"
     )
     assert result.comments_succeeded == 2, (
-        "only the two well-formed comments succeed; "
-        f"got {result.comments_succeeded!r}"
+        f"only the two well-formed comments succeed; got {result.comments_succeeded!r}"
     )
 
 
@@ -2093,17 +2088,13 @@ def test_orchestrator_comment_fetch_failure_fails_issue() -> None:
         f"the failed fetch must count one failed issue; got {result.issues_failed!r}"
     )
     assert not any(
-        event[0] == "issue_succeeded" and event[1] == "1"
-        for event in report.events
+        event[0] == "issue_succeeded" and event[1] == "1" for event in report.events
     ), (
         "no issue_succeeded may be reported for the fetch-failed issue; "
         f"events={report.events!r}"
     )
-    assert not any(
-        event[0] == "issue" and event[1] == 1 for event in state.events
-    ), (
-        "the fetch-failed issue must not be checkpointed; "
-        f"events={state.events!r}"
+    assert not any(event[0] == "issue" and event[1] == 1 for event in state.events), (
+        f"the fetch-failed issue must not be checkpointed; events={state.events!r}"
     )
 
 
@@ -2146,9 +2137,7 @@ class _PersistingSpyStateStore(StateStore):
         git_pushed: bool,
         migrated: dict[int, int],
     ) -> None:
-        self.save_calls.append(
-            (bool(repo_created), bool(git_pushed), dict(migrated))
-        )
+        self.save_calls.append((bool(repo_created), bool(git_pushed), dict(migrated)))
         super().save(repo_created, git_pushed, migrated)
 
 
@@ -2237,9 +2226,7 @@ def test_state_records_git_pushed_after_successful_push_and_skips_on_resume(
         return real_create_b(title, body, labels)
 
     api_b.create_issue = _recording_create_b  # type: ignore[method-assign]
-    orch_b, _fakes_b = _build(
-        api=api_b, git=git_b, state=store_b, report=_FakeReport()
-    )
+    orch_b, _fakes_b = _build(api=api_b, git=git_b, state=store_b, report=_FakeReport())
     result_b = orch_b.run()
     git_skipped = not git_b.clone_called and not git_b.push_called
     remaining_migrated = (
@@ -2272,9 +2259,7 @@ def test_state_records_git_pushed_after_successful_push_and_skips_on_resume(
             f"created titles={created_titles_b!r}, "
             f"issues_succeeded={result_b.issues_succeeded!r}"
         )
-    assert not failures, (
-        "resume truthfulness failures:\n" + "\n".join(failures)
-    )
+    assert not failures, "resume truthfulness failures:\n" + "\n".join(failures)
 
 
 def test_state_does_not_record_git_pushed_when_push_fails(tmp_path: Path) -> None:
@@ -2315,9 +2300,7 @@ def test_state_does_not_record_git_pushed_when_push_fails(tmp_path: Path) -> Non
         "without any save() call the falsy-git_pushed assertion below "
         "would pass vacuously on an empty list"
     )
-    assert all(
-        not git_pushed for _, git_pushed, _ in store.save_calls
-    ), (
+    assert all(not git_pushed for _, git_pushed, _ in store.save_calls), (
         "no save() after a failed push may record git_pushed=True; "
         f"save_calls={store.save_calls!r}"
     )
@@ -2335,4 +2318,37 @@ def test_state_does_not_record_git_pushed_when_push_fails(tmp_path: Path) -> Non
     assert git2.clone_called is True, (
         "a resume after a failed push must run the Git phase again; "
         f"clone_called={git2.clone_called!r}"
+    )
+
+
+# Resume skip counter (append-only)
+
+
+def test_orchestrator_increments_issues_skipped_on_resume() -> None:
+    """A resume-skipped issue must count toward issues_skipped.
+
+    The checkpoint is prepopulated with issue 1 already migrated; two
+    issues run. Issue 1 is skipped on resume while issue 2 is created
+    successfully.
+
+    RED: ``MigrationResult`` has no ``issues_skipped`` field, so
+    ``result.issues_skipped`` raises ``AttributeError``.
+    """
+    api = _FakeApi(issues=[_issue(1, title="first"), _issue(2, title="second")])
+    state = _FakeState(migrated={1: 101})
+
+    orch, _fakes = _build(api=api, state=state, report=_FakeReport())
+
+    result = orch.run()
+
+    assert result.issues_skipped == 1, (
+        f"one issue was skipped on resume; got issues_skipped={result.issues_skipped!r}"
+    )
+    assert result.issues_attempted == 1, (
+        "only the non-resumed issue counts as attempted; "
+        f"got issues_attempted={result.issues_attempted!r}"
+    )
+    assert result.issues_succeeded == 1, (
+        "the non-resumed issue was created successfully; "
+        f"got issues_succeeded={result.issues_succeeded!r}"
     )

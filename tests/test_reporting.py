@@ -586,8 +586,7 @@ def test_orchestrator_skips_malformed_comment_with_warning() -> None:
     )
     skipped = reporter.comment_skipped_calls[0]
     assert len(skipped) == 2, (
-        "comment_skipped must be called with (source_number, reason); got "
-        f"{skipped!r}"
+        f"comment_skipped must be called with (source_number, reason); got {skipped!r}"
     )
     skipped_number, reason = skipped
     assert int(skipped_number) == source_number, (
@@ -610,8 +609,7 @@ def test_orchestrator_skips_malformed_comment_with_warning() -> None:
     )
     assert len(github.comment_bodies) == 1
     assert github.comment_bodies[0].strip() != "", (
-        "expected a non-empty wrapped comment body, got "
-        f"{github.comment_bodies!r}"
+        f"expected a non-empty wrapped comment body, got {github.comment_bodies!r}"
     )
     assert "a well-formed comment" in github.comment_bodies[0], (
         "expected the well-formed comment text to be posted; got "
@@ -656,9 +654,7 @@ def test_reporter_emits_issue_skipped_message_for_resumed_issue() -> None:
         f"expected exactly one stdout line for issue_skipped, got {out.lines!r}"
     )
     line = out.lines[0]
-    assert "SKIP CB #5" in line, (
-        f"expected 'SKIP CB #5' in skipped line; got {line!r}"
-    )
+    assert "SKIP CB #5" in line, f"expected 'SKIP CB #5' in skipped line; got {line!r}"
     assert "already migrated" in line, (
         f"expected 'already migrated' in skipped line; got {line!r}"
     )
@@ -686,14 +682,80 @@ def test_reporter_emits_issue_skipped_message_for_resumed_issue() -> None:
         "expected exactly one issue_skipped call with (1,); got "
         f"{recording.issue_skipped_calls!r}"
     )
-    assert all(
-        int(call[0]) != 1 for call in recording.issue_started_calls
-    ), (
+    assert all(int(call[0]) != 1 for call in recording.issue_started_calls), (
         "issue_started must NOT be called for resumed issue 1; got "
         f"{recording.issue_started_calls!r}"
     )
     succeeded_numbers = [int(call[0]) for call in recording.issue_succeeded_calls]
     assert 2 in succeeded_numbers, (
-        f"expected issue_succeeded for CB #2; got "
-        f"{recording.issue_succeeded_calls!r}"
+        f"expected issue_succeeded for CB #2; got {recording.issue_succeeded_calls!r}"
+    )
+
+
+# Truthful reporting on zero-work runs (append-only)
+
+
+def test_reporter_all_skipped_does_not_claim_all_migrated():
+    """An all-skipped run must not claim all issues were migrated."""
+    out = _Sink()
+    err = _Sink()
+    reporter = Reporter(output=out, error_output=err)
+
+    result: dict[str, Any] = {
+        "issues_attempted": 0,
+        "issues_succeeded": 0,
+        "issues_skipped": 19,
+        "issues_failed": 0,
+        "comments_attempted": 0,
+        "comments_succeeded": 0,
+        "comments_failed": 0,
+        "git": {"clone": "ok", "push": "ok"},
+        "failures": [],
+        "dry_run": False,
+    }
+
+    reporter.render_final(result)
+
+    text = out.text() + "\n" + err.text()
+    assert "All issues migrated" not in text, (
+        "all-skipped run must not claim 'All issues migrated'; got:\n" + text
+    )
+    assert "already migrated" in text.lower(), (
+        "all-skipped run must mention 'already migrated'; got:\n" + text
+    )
+    assert "19 skipped" in text, (
+        "expected the Issues line to contain '19 skipped'; got:\n" + text
+    )
+    assert "0/0 migrated" not in text, (
+        "all-skipped run must not render '0/0 migrated'; got:\n" + text
+    )
+
+
+def test_reporter_empty_source_does_not_claim_all_migrated():
+    """An empty-source run must not claim all issues were migrated."""
+    out = _Sink()
+    err = _Sink()
+    reporter = Reporter(output=out, error_output=err)
+
+    result: dict[str, Any] = {
+        "issues_attempted": 0,
+        "issues_succeeded": 0,
+        "issues_skipped": 0,
+        "issues_failed": 0,
+        "comments_attempted": 0,
+        "comments_succeeded": 0,
+        "comments_failed": 0,
+        "git": {"clone": "ok", "push": "ok"},
+        "failures": [],
+        "dry_run": False,
+    }
+
+    reporter.render_final(result)
+
+    text = out.text() + "\n" + err.text()
+    assert "All issues migrated" not in text, (
+        "empty-source run must not claim 'All issues migrated'; got:\n" + text
+    )
+    assert "nothing to do" in text.lower(), (
+        "empty-source run must mention 'nothing to do'; got:\n" + text
     )

@@ -86,6 +86,7 @@ class FakeRequest:
     params: dict[str, Any] | None = None
     headers: dict[str, str] | None = None
     json_body: Any = None
+    timeout: float | None = None
 
 
 class FakeTransport:
@@ -107,6 +108,7 @@ class FakeTransport:
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         json_body: Any = None,
+        timeout: float | None = None,
     ) -> FakeResponse:
         self.calls.append(
             FakeRequest(
@@ -115,6 +117,7 @@ class FakeTransport:
                 params=params,
                 headers=headers,
                 json_body=json_body,
+                timeout=timeout,
             )
         )
         if not self._scripted:
@@ -478,9 +481,10 @@ def test_403_with_zero_rate_limit_remaining_retries_then_raises() -> None:
     def fake_sleep(s: float) -> None:
         sleep_calls.append(s)
 
-    with patch("forgejo_to_github.github.time.sleep", side_effect=fake_sleep), pytest.raises(
-        GitHubRateLimitError
-    ) as excinfo:
+    with (
+        patch("forgejo_to_github.github.time.sleep", side_effect=fake_sleep),
+        pytest.raises(GitHubRateLimitError) as excinfo,
+    ):
         client.create_issue(title="t", body="b", labels=[])
 
     err = excinfo.value
@@ -515,8 +519,9 @@ def test_rate_limit_429_is_retried_then_terminates_with_rate_limit_error() -> No
     def fake_sleep(s: float) -> None:
         sleep_calls.append(s)
 
-    with patch("forgejo_to_github.github.time.sleep", side_effect=fake_sleep), pytest.raises(
-        GitHubRateLimitError
+    with (
+        patch("forgejo_to_github.github.time.sleep", side_effect=fake_sleep),
+        pytest.raises(GitHubRateLimitError),
     ):
         client.create_issue(title="t", body="b", labels=[])
 
@@ -586,3 +591,29 @@ def test_github_client_proactive_sleep_when_remaining_low() -> None:
     assert number == 7
     assert len(transport.calls) == 1
     assert sleep_calls == [2]
+
+
+# ---------------------------------------------------------------------------
+# HTTP timeout regression (append-only)
+# ---------------------------------------------------------------------------
+
+
+def test_github_client_transport_call_includes_timeout() -> None:
+    """Every transport call must include ``timeout=30``.
+
+    Regression: legacy ``main:f2gh.py`` passed ``timeout=30`` on every
+    ``requests`` call, but ``GitHubClient`` currently passes no
+    ``timeout=`` kwarg on any ``self._transport(...)`` call site.
+    """
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(status_code=404, json_payload={"message": "Not Found"}),
+        ]
+    )
+    client = _client(transport)
+
+    result = client.check_repository_exists()
+
+    assert result is None
+    assert len(transport.calls) == 1
+    assert transport.calls[0].timeout == 30
