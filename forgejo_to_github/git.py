@@ -681,7 +681,7 @@ class GitMirror:
         ``owner/widgets``). For malformed target slugs, the prefix
         falls back to ``"f2gh-"``.
         """
-        slug = self._target_url.rstrip("/").rstrip(".git").rsplit("/", 1)[-1]
+        slug = self._target_url.rstrip("/").removesuffix(".git").rsplit("/", 1)[-1]
         if "/" in self._target_url and slug:
             return f"f2gh-{slug}-"
         return "f2gh-"
