@@ -97,7 +97,7 @@ Methods:
 | Method | Returns | HTTP contract |
 |--------|---------|---------------|
 | `list_issues(state: str = "all") -> list[dict]` | list of parsed issue dicts sorted ascending by `created_at` | `GET /repos/{owner}/{repo}/issues?state={state}&type=issues&page=N&limit=50`; paginates until an empty page is returned. |
-| `list_comments(issue_id: int) -> list[dict]` | list of parsed comment dicts in API order (chronological) | `GET /repos/{owner}/{repo}/issues/{issue_id}/comments?issue_id={issue_id}&page=N`; paginates until empty page. |
+| `list_comments(issue_id: int) -> list[dict]` | list of parsed comment dicts in API order (chronological) | Exactly one `GET /repos/{owner}/{repo}/issues/{issue_id}/comments` with no query parameters and `timeout=self._timeout`. The decoded body must be a JSON list. If a parsable `X-Total-Count` response header differs from the returned list length, raise `CodebergTransportError`; the existing status/error mapping otherwise applies. |
 | `get_issue(issue_number: int) -> dict` | parsed dict | `GET /repos/{owner}/{repo}/issues/{issue_number}` |
 | `get_repository_description() -> str` | description string. **Empty string** when the field is missing or `null`. The orchestrator is responsible for the "Migrated from Codeberg" fallback; the client does not invent a default. | `GET /repos/{owner}/{repo}`; returns the `description` field, or `""` if missing/null. |
 
@@ -306,7 +306,11 @@ preserved are:
 - **`f2gh.py` is not modified in this stage.** The legacy module-level
   functions stay in place; tests in `tests/test_api_clients.py` and
   `tests/test_repository_description.py` continue to pass against the
-  legacy functions. Removal happens in stage 06.
+  legacy functions, with one deliberate Slice H exception:
+  `tests/test_api_clients.py::test_fetch_codeberg_comments_uses_issue_index_in_path`
+  is amended to preserve its endpoint-path assertion while asserting
+  that no `issue_id` query parameter is sent, matching old `main`.
+  Removal happens in stage 06.
 - **Public test surface is the new clients.** The tests in
   `tests/test_codeberg_client.py` and `tests/test_github_client.py`
   exercise the new public surface. They are the contract.
@@ -328,7 +332,9 @@ Codeberg:
 - `tests/test_codeberg_client.py::test_list_issues_sets_json_accept_and_user_agent`
 - `tests/test_codeberg_client.py::test_list_issues_omits_auth_header_when_no_token`
 - `tests/test_codeberg_client.py::test_list_issues_sends_token_authorization_when_configured`
-- `tests/test_codeberg_client.py::test_list_comments_passes_issue_id_param_and_paginates`
+- `tests/test_codeberg_client.py::test_list_comments_makes_single_request_without_pagination_params` (to be added in Slice H RED)
+- `tests/test_codeberg_client.py::test_list_comments_rejects_total_count_mismatch` (to be added in Slice H RED)
+- Pending amendment in Slice H RED: `tests/test_codeberg_client.py::test_list_comments_passes_issue_id_param_and_paginates` encodes the removed pagination behavior and is superseded by the two tests above.
 - `tests/test_codeberg_client.py::test_get_issue_returns_parsed_payload`
 - `tests/test_codeberg_client.py::test_get_issue_404_raises_not_found_with_context`
 - `tests/test_codeberg_client.py::test_get_issue_auth_errors_raise_codeberg_auth_error`

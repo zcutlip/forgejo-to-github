@@ -919,9 +919,9 @@ criteria":
 - `./scripts/run-tests.sh`, `ruff check .`, and `mypy f2gh.py
   forgejo_to_github/` pass.
 
-### Slice H — HTTP timeout + truthful all-skipped reporting
+### Slice H — HTTP timeout + truthful all-skipped reporting + comment-fetch termination
 
-**Resolves:** two refactor regressions discovered during live testing
+**Resolves:** three refactor regressions discovered during live testing
 after Slice G:
 
 1. **HTTP timeout regression (critical).** Old `main` passed
@@ -941,6 +941,12 @@ after Slice G:
    destination repo is empty. Truthfulness rule 1 (05-reporter.md
    §3.4) fires on `issues_failed == 0` without checking
    `issues_succeeded > 0`, so a zero-work run falsely matches.
+3. **Comment-fetch infinite loop (hang).** `CodebergClient.list_comments`
+   reuses `_paginate`, which stops only on an empty page. The Forgejo
+   comments endpoint did not honor out-of-range `page` requests in live
+   probing: it returned the full thread instead of an empty page, so
+   fetching one issue’s comments can loop indefinitely. Old `main`
+   fetched comments with one parameterless GET and no pagination loop.
 
 **Scope:**
 
@@ -964,7 +970,17 @@ after Slice G:
    Issues line surfaces the skip count: `"Issues: 0 migrated (N
    skipped)"` when `issues_skipped > 0`, instead of `"0/0 migrated"`.
 
-**Out of scope for Slice H:** anything beyond these three fixes.
+4. **Comment-fetch termination.** Replace paginated fetching for
+   issue comments with one parameterless GET:
+   `GET /repos/{owner}/{repo}/issues/{issue_id}/comments`. Do not send
+   `page`, `limit`, or `issue_id` query parameters. Require the decoded
+   body to be a list; if an `X-Total-Count` response header is present
+   and parses as an integer different from the returned list length,
+   raise `CodebergTransportError` instead of silently accepting a
+   potentially truncated thread. Keep `timeout=self._timeout` and the
+   existing status/error translation.
+
+**Out of scope for Slice H:** anything beyond these four fixes.
 
 **RED tests (all `to be added`):**
 
@@ -984,11 +1000,28 @@ after Slice G:
 - `test_orchestrator_increments_issues_skipped_on_resume` — drives
   with prepopulated state; asserts `result.issues_skipped` equals
   the resumed count.
+- `test_list_comments_makes_single_request_without_pagination_params`
+  — drives `CodebergClient.list_comments` with one scripted 200
+  response; asserts exactly one transport call, the comments path,
+  no query parameters, and the parsed list return.
+- `test_list_comments_rejects_total_count_mismatch` — scripts a list
+  whose length differs from a parsable `X-Total-Count` header;
+  asserts `CodebergTransportError`.
+- Amend `tests/test_api_clients.py::test_fetch_codeberg_comments_uses_issue_index_in_path`
+  to preserve the path assertion while asserting that the request
+  sends no `issue_id` query parameter, matching old `main`.
+- Replace `tests/test_codeberg_client.py::test_list_comments_passes_issue_id_param_and_paginates`
+  with the single-request contract above; that locked test encodes
+  the infinite-loop behavior.
 
 **GREEN work:**
 
 - `forgejo_to_github/codeberg.py` — client-level `_timeout` + pass
   on every transport call.
+- `forgejo_to_github/codeberg.py::list_comments` — one parameterless
+  GET on the comments path; validate that the body is a list and
+  cross-check a parsable `X-Total-Count` header; no `_paginate`, no
+  `page`, `limit`, or `issue_id` query parameters.
 - `forgejo_to_github/github.py` — same.
 - `forgejo_to_github/domain.py` — add `issues_skipped: int = 0` to
   `MigrationResult`.
@@ -1023,6 +1056,9 @@ mypy forgejo_to_github/codeberg.py forgejo_to_github/github.py \
    dry-run-only field, not populated on normal runs).
 3. HTTP timeout is a client-level default (30 s, matching `main`),
    overridable per-call, not a transport-level constant.
+4. H.3 is scoped as part of Slice H at user direction. The RED phase
+   still requires explicit approval because it amends two locked
+   tests that currently encode paginated comment fetching.
 
 ### 5.1 Final manual verification
 
