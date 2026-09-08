@@ -16,7 +16,7 @@
 # e.g., mock-op vs mock_op
 # This will get used for scripts that try to locate files *within* the project
 # e.g., mock_op/__about__.py
-# ROOT_PACKAGE_NAME="repo_mgmt_scripts"
+ROOT_PACKAGE_NAME="forgejo_to_github"
 
 # Either don't set, or set to "1" to enable
 # if set at all and not set to "1" twine upload will not happen
