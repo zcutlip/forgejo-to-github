@@ -373,3 +373,28 @@ def test_429_without_retry_after_header_still_raises_rate_limit_error() -> None:
 
     with pytest.raises(CodebergRateLimitError):
         client.get_issue(issue_number=1)
+
+
+# Error message correctness (append-only)
+
+
+def test_codeberg_get_issue_rate_limit_message_says_codeberg() -> None:
+    transport = FakeTransport(
+        responses=[
+            FakeResponse(
+                status_code=429,
+                json_payload={"message": "rate limited"},
+                headers={"Retry-After": "30"},
+            )
+        ]
+    )
+    client = _client(transport)
+
+    from forgejo_to_github.codeberg import CodebergRateLimitError
+
+    with pytest.raises(CodebergRateLimitError) as excinfo:
+        client.get_issue(issue_number=1)
+
+    text = str(excinfo.value)
+    assert "Codeberg" in text, f"rate-limit message missing 'Codeberg': {text!r}"
+    assert "Codehub" not in text, f"rate-limit message typo 'Codehub' found: {text!r}"
