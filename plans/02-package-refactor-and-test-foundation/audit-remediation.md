@@ -919,6 +919,111 @@ criteria":
 - `./scripts/run-tests.sh`, `ruff check .`, and `mypy f2gh.py
   forgejo_to_github/` pass.
 
+### Slice H — HTTP timeout + truthful all-skipped reporting
+
+**Resolves:** two refactor regressions discovered during live testing
+after Slice G:
+
+1. **HTTP timeout regression (critical).** Old `main` passed
+   `timeout=30` on every `requests.get()` call (main:186, 200, 517,
+   531). The refactored `RequestsTransport` adapter accepts a
+   `timeout` parameter but the clients (`CodebergClient`,
+   `GitHubClient`) never pass one — every call defaults to
+   `timeout=None` → blocks indefinitely on a non-responsive server.
+   Symptom: a live migration hung at `codeberg.list_comments` after
+   creating the first issue; the comments GET hit a slow/dropped
+   Codeberg response and never returned.
+2. **False-success reporting on all-skipped runs.** The final-report
+   header says `"Migration complete! All issues migrated."` when
+   `issues_attempted == 0` and `issues_succeeded == 0` — e.g., a
+   stale-state rerun where all issues are in `state.migrated` and
+   every issue is skipped. The tool claims success while the
+   destination repo is empty. Truthfulness rule 1 (05-reporter.md
+   §3.4) fires on `issues_failed == 0` without checking
+   `issues_succeeded > 0`, so a zero-work run falsely matches.
+
+**Scope:**
+
+1. **HTTP timeout.** Add a client-level default timeout (30 s,
+   matching `main`) to every transport call in `CodebergClient` and
+   `GitHubClient`. The timeout is passed as `timeout=self._timeout`
+   on every `self._transport(...)` call (or equivalent); tests can
+   override it.
+2. **`issues_skipped` counter.** Add `issues_skipped: int = 0` to
+   `MigrationResult`; increment it in the resume guard (alongside
+   the `issue_skipped` reporter call). Explicit and testable —
+   `issues_discovered` is a dry-run-only field and is not populated
+   on normal runs, so the skip count cannot be derived.
+3. **Truthful header logic.** Amend reporting truthfulness rule 1:
+   `"Migration complete! All issues migrated."` fires only when
+   `issues_succeeded > 0` AND `issues_failed == 0`. When
+   `issues_attempted == 0` and `issues_skipped > 0`: `"Migration
+   complete — all issues already migrated"` (truthful, not "All
+   migrated"). When `issues_attempted == 0` and `issues_skipped ==
+   0` (empty source): `"Migration complete — nothing to do"`. The
+   Issues line surfaces the skip count: `"Issues: 0 migrated (N
+   skipped)"` when `issues_skipped > 0`, instead of `"0/0 migrated"`.
+
+**Out of scope for Slice H:** anything beyond these three fixes.
+
+**RED tests (all `to be added`):**
+
+- `test_codeberg_client_transport_call_includes_timeout` — asserts
+  the transport was called with `timeout=30` (or the client's
+  default) on a list/get/paginate call.
+- `test_github_client_transport_call_includes_timeout` — same for
+  GitHub client calls.
+- `test_reporter_all_skipped_does_not_claim_all_migrated` — drives
+  with `issues_attempted=0, issues_succeeded=0, issues_skipped=19,
+  issues_failed=0`; asserts header does NOT contain "All issues
+  migrated"; asserts header contains "already migrated"; asserts
+  Issues line contains "19 skipped".
+- `test_reporter_empty_source_does_not_claim_all_migrated` — drives
+  with all zeros; asserts header does NOT contain "All issues
+  migrated"; asserts "nothing to do".
+- `test_orchestrator_increments_issues_skipped_on_resume` — drives
+  with prepopulated state; asserts `result.issues_skipped` equals
+  the resumed count.
+
+**GREEN work:**
+
+- `forgejo_to_github/codeberg.py` — client-level `_timeout` + pass
+  on every transport call.
+- `forgejo_to_github/github.py` — same.
+- `forgejo_to_github/domain.py` — add `issues_skipped: int = 0` to
+  `MigrationResult`.
+- `forgejo_to_github/migration.py` — increment `issues_skipped` in
+  the resume guard.
+- `forgejo_to_github/reporting.py` — header logic (three cases) +
+  Issues line denominator.
+
+**Verification (Slice H):**
+
+```bash
+./scripts/run-tests.sh tests/test_codeberg_client.py
+./scripts/run-tests.sh tests/test_github_client.py
+./scripts/run-tests.sh tests/test_reporting.py
+./scripts/run-tests.sh tests/test_orchestration.py
+./scripts/run-tests.sh                          # full suite
+ruff check forgejo_to_github/codeberg.py forgejo_to_github/github.py \
+  forgejo_to_github/domain.py forgejo_to_github/migration.py \
+  forgejo_to_github/reporting.py
+mypy forgejo_to_github/codeberg.py forgejo_to_github/github.py \
+  forgejo_to_github/migration.py forgejo_to_github/reporting.py
+```
+
+**Stop gate (Slice H):** report the diff and verification.
+
+**Decisions (user-approved, 2026-09-08):**
+
+1. H.1 and H.2 batched as one Slice H (not split into sequential
+   mini-slices).
+2. `issues_skipped` is an explicit new `MigrationResult` field
+   (option B), not derived from `issues_discovered` (which is a
+   dry-run-only field, not populated on normal runs).
+3. HTTP timeout is a client-level default (30 s, matching `main`),
+   overridable per-call, not a transport-level constant.
+
 ### 5.1 Final manual verification
 
 After Slice G's GREEN stop report is approved, the user (per

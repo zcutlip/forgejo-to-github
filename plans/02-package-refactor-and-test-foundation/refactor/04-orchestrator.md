@@ -206,6 +206,7 @@ The four "issue-succeeded" / "issue-failed" mappings to
 | `issues_attempted` | S1 begins for this issue |
 | `issues_succeeded` | S5 completes for this issue |
 | `issues_failed` | S6 records a failure (i.e., S2 failed) |
+| `issues_skipped` | Resume guard fires: issue is in `state.migrated` (Slice H) |
 | `comments_attempted` | S3 sees each comment — incremented **before** the malformed filter, so skipped comments count as attempted |
 | `comments_succeeded` | S3 completes for each comment (per comment) |
 | `comments_failed` | S3 records a per-comment failure (per comment) |
@@ -289,6 +290,7 @@ Fields (these names are part of the contract asserted by
 | `issues_attempted` | `int` | Number of issues the orchestrator entered. Always `0` on a dry run: discovery is not an attempt. |
 | `issues_succeeded` | `int` | Number of issues created successfully. |
 | `issues_failed` | `int` | Number of issues whose create failed. |
+| `issues_skipped` | `int` | Number of issues skipped on resume (already in `state.migrated`). Slice H. |
 | `issues_discovered` | `int` | Number of source issues found by the dry-run read-only listing. `0` on normal runs (discovery is only recorded during dry-run short-circuit). |
 | `comments_attempted` | `int` | Total comments across all attempted issues. |
 | `comments_succeeded` | `int` | Total comments posted successfully. |
