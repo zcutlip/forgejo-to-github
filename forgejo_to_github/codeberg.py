@@ -206,16 +206,101 @@ class CodebergClient:
         )
 
     def list_comments(self, issue_id: int) -> list[dict[str, Any]]:
-        """List comments for a single issue, paginating until empty.
+        """List comments for a single issue with one request.
 
-        The ``issue_id`` is passed both as a path segment and as the
-        ``issue_id`` query parameter, matching the legacy behavior
-        pinned by :file:`tests/test_api_clients.py`.
+        Issues a single ``GET`` request with no query parameters and
+        the client timeout. The response body must decode to a list;
+        a non-list body raises :class:`CodebergTransportError`. When
+        the ``X-Total-Count`` header is present and parses as an
+        integer, a value different from ``len(comments)`` raises
+        :class:`CodebergTransportError`.
         """
-        return self._paginate(
-            path=f"/repos/{self._owner}/{self._repo}/issues/{issue_id}/comments",
-            base_params={"issue_id": issue_id},
-        )
+        path = f"/repos/{self._owner}/{self._repo}/issues/{issue_id}/comments"
+        url = f"{self.api_base}{path}"
+        try:
+            response = self._transport(
+                "GET",
+                url,
+                params=None,
+                headers=self._headers(),
+                timeout=self._timeout,
+            )
+        except Exception as exc:
+            raise CodebergTransportError(
+                _redact(f"transport error contacting Codeberg: {exc}", self._token)
+            ) from exc
+
+        status = getattr(response, "status_code", 0)
+        if status == 404:
+            raise CodebergNotFoundError(
+                f"issue {issue_id} not found on Codeberg",
+                url=url,
+                issue_number=issue_id,
+            )
+        if status in (401, 403):
+            raise CodebergAuthError(
+                _redact(
+                    f"authentication failure contacting Codeberg ({status})",
+                    self._token,
+                )
+            )
+        if status == 422:
+            raise CodebergValidationError(
+                "Codeberg rejected the request as invalid",
+                messages=_extract_messages(response),
+            )
+        if status == 429:
+            retry_after = _parse_retry_after(response)
+            raise CodebergRateLimitError(
+                "Codeberg rate limit exceeded",
+                retry_after=retry_after,
+            )
+        if 500 <= status < 600:
+            raise CodebergTransportError(
+                _redact(
+                    f"Codeberg server error {status} contacting {url}",
+                    self._token,
+                )
+            )
+        if not (200 <= status < 300):
+            raise CodebergTransportError(
+                _redact(
+                    f"unexpected status {status} contacting {url}",
+                    self._token,
+                )
+            )
+
+        try:
+            comments = response.json()
+        except Exception as exc:
+            raise CodebergTransportError(
+                _redact(f"transport error contacting Codeberg: {exc}", self._token)
+            ) from exc
+        if not isinstance(comments, list):
+            raise CodebergTransportError(
+                _redact(
+                    f"unexpected response contacting {url}",
+                    self._token,
+                )
+            )
+        headers = getattr(response, "headers", None) or {}
+        raw_count = headers.get("X-Total-Count")
+        if raw_count is None:
+            raw_count = headers.get("x-total-count")
+        if raw_count is not None:
+            try:
+                total = int(raw_count)
+            except (TypeError, ValueError):
+                return comments
+            if total != len(comments):
+                raise CodebergTransportError(
+                    _redact(
+                        f"comment count mismatch contacting {url}: "
+                        f"expected {total}, got {len(comments)}",
+                        self._token,
+                    )
+                )
+        return comments
 
     def get_issue(self, issue_number: int) -> dict[str, Any]:
         """Fetch a single issue by its Codeberg number."""
