@@ -947,6 +947,11 @@ after Slice G:
    probing: it returned the full thread instead of an empty page, so
    fetching one issue’s comments can loop indefinitely. Old `main`
    fetched comments with one parameterless GET and no pagination loop.
+   Live evidence (forgejo/forgejo#410, 55 comments): the unparameterized
+   comments GET exposes `x-total-count: 55`; `limit=1&page=100` still
+   returned the full thread from the earliest comments instead of an
+   empty page; on the short thread, `issue_id=1&page=1` and
+   `issue_id=1&page=2` returned the same 2 comments.
 
 **Scope:**
 
