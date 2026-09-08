@@ -30,6 +30,8 @@ from unittest.mock import Mock, patch
 import pytest
 
 import f2gh
+from forgejo_to_github.__about__ import __version__
+from forgejo_to_github.about import about
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -284,9 +286,7 @@ def test_cli_prompter_bypasses_when_yes_flag_set() -> None:
     """
     from forgejo_to_github.domain import Repository
 
-    repo = Repository(
-        source="owner/source", target="owner/target", yes=True
-    )
+    repo = Repository(source="owner/source", target="owner/target", yes=True)
     prompter = f2gh._make_prompter(repo)
 
     # A fake stdin that would fail if read.
@@ -307,14 +307,44 @@ def test_cli_prompter_reads_stdin_when_yes_flag_unset() -> None:
     """
     from forgejo_to_github.domain import Repository
 
-    repo = Repository(
-        source="owner/source", target="owner/target", yes=False
-    )
+    repo = Repository(source="owner/source", target="owner/target", yes=False)
     prompter = f2gh._make_prompter(repo)
 
     with patch("builtins.input", return_value="yes"):
         result = prompter("Proceed?", False)
 
-    assert result is True, (
-        f"input 'yes' must return True; got {result!r}"
-    )
+    assert result is True, f"input 'yes' must return True; got {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# 7. --version
+# ---------------------------------------------------------------------------
+
+
+def test_parse_args_version_flag_prints_version_and_exits_zero(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--version`` must exit 0 and print the canonical about string to stdout."""
+    with pytest.raises(SystemExit) as exc_info:
+        _run_parse_args(["--version"])
+
+    assert exc_info.value.code == 0
+
+    captured = capsys.readouterr()
+    assert captured.out, "expected --version text on stdout"
+    assert about() in captured.out
+    assert __version__ in captured.out
+
+
+def test_help_description_matches_version_string(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--help`` description and ``--version`` output share the canonical string."""
+    with pytest.raises(SystemExit) as exc_info:
+        _run_parse_args(["--help"])
+
+    assert exc_info.value.code == 0
+
+    captured = capsys.readouterr()
+    assert captured.out, "expected --help text on stdout"
+    assert about() in captured.out

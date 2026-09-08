@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "forgejo-to-github"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Migrate repos from Codeberg/Forgejo to GitHub: issues, comments, labels, git mirror"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,6 +23,9 @@ f2gh = "f2gh:main"
 [tool.setuptools]
 py-modules = ["f2gh"]
 packages = ["forgejo_to_github"]
+
+[tool.setuptools.dynamic]
+version = {attr = "forgejo_to_github.__about__.__version__"}
 
 [tool.pytest.ini_options]
 addopts = "-n auto"

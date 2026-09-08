@@ -7,6 +7,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+from forgejo_to_github.about import about
 from forgejo_to_github.codeberg import CodebergClient
 from forgejo_to_github.domain import Repository
 from forgejo_to_github.git import GitMirror
@@ -18,8 +19,10 @@ from forgejo_to_github.transport import RequestsTransport
 
 
 def parse_args() -> argparse.Namespace:
+    description = about()
     parser = argparse.ArgumentParser(
-        description="Migrate repos from Codeberg/Forgejo to GitHub."
+        description=description,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--source",
@@ -59,6 +62,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help='Repo description on GitHub (default: copied from Codeberg, fallback "Migrated from Codeberg")',
     )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=description,
+        help="Show version and exit",
+    )
     return parser.parse_args()
 
 
@@ -69,6 +78,7 @@ def _make_prompter(repo: Repository) -> Callable[[str, bool], bool]:
     stdin. Otherwise it prompts via ``input()`` with a ``[y/N]`` suffix
     and returns True for "y" or "yes" (case-insensitive), False otherwise.
     """
+
     def prompter(prompt: str, default: bool = False) -> bool:
         if repo.yes:
             return True
