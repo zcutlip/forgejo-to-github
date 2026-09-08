@@ -1006,3 +1006,33 @@ def test_tag_push_failure_is_nonfatal_for_issue_migration(tmp_path: Any) -> None
     assert "GitCloneError" not in cls_name
     assert not isinstance(exc, SystemExit)
     assert "GitTagPushError" in cls_name
+
+
+# Tempdir prefix suffix handling (append-only)
+
+
+def test_git_mirror_tempdir_prefix_uses_removesuffix_not_rstrip(
+    tmp_path: Any,
+) -> None:
+    """``tagging.git`` must yield the ``tagging`` slug, not an over-stripped one.
+
+    ``str.rstrip(".git")`` strips the character set ``{'.', 'g', 'i', 't'}``,
+    so ``tagging.git`` mangles to ``taggin``. The prefix must strip only the
+    ``.git`` suffix.
+    """
+    runner = _FakeRunner()
+    fs_factory = _mkdtemp_under(tmp_path)
+
+    mirror = GitMirror(
+        source_url="https://codeberg.org/owner/tagging.git",
+        target_url="https://github.com/owner/tagging.git",
+        github_token=TOKEN_SENTINEL,
+        command_runner=runner,
+        tempdir_factory=fs_factory,
+    )
+
+    actual = mirror._tempdir_prefix()
+    assert actual == "f2gh-tagging-", (
+        f"expected slug 'tagging' (prefix 'f2gh-tagging-') vs mangled actual "
+        f"{actual!r} (rstrip char-set over-strip of 'tagging.git' -> 'taggin')"
+    )
