@@ -577,6 +577,7 @@ class MigrationOrchestrator:
         # attempt: it is neither counted nor reported as started.
         if self._already_migrated(source_number):
             self._safe_issue_skipped(source_number)
+            result.issues_skipped += 1
             return
 
         result.issues_attempted += 1

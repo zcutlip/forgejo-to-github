@@ -293,7 +293,68 @@ class Reporter:
             _emit(lines, use_error=True)
             return
 
-        # Complete success.
+        # Complete success. The "all migrated" claim fires ONLY when real
+        # work succeeded (issues_succeeded > 0) with no failures. Zero-work
+        # runs (all-skipped on resume, or empty source) take truthful
+        # branches below instead — they must never claim "All issues
+        # migrated" nor render "0/0 migrated".
+        issues_skipped = _get_field(result, "issues_skipped", 0)
+        if not isinstance(issues_skipped, int):
+            issues_skipped = 0
+        succeeded_count = (
+            issues_succeeded if isinstance(issues_succeeded, int) else 0
+        )
+        attempted_count = (
+            issues_attempted if isinstance(issues_attempted, int) else 0
+        )
+        comments_attempted_count = (
+            comments_attempted if isinstance(comments_attempted, int) else 0
+        )
+
+        if attempted_count == 0 and issues_skipped > 0:
+            # All-skipped on resume: nothing was attempted because every
+            # issue was already checkpointed.
+            skipped_lines: list[str] = []
+            skipped_lines.append(
+                "Migration complete — all issues already migrated"
+            )
+            skipped_lines.append(
+                f"Issues: 0 migrated ({issues_skipped} skipped)"
+            )
+            if comments_attempted_count > 0 and isinstance(
+                comments_succeeded, int
+            ):
+                skipped_lines.append(
+                    f"Comments: {comments_succeeded}/{comments_attempted} migrated"
+                )
+            skipped_lines.append(f"Git: clone {clone_status}, push {push_status}")
+            _emit(skipped_lines, use_error=False)
+            return
+
+        if (
+            attempted_count == 0
+            and issues_skipped == 0
+            and succeeded_count == 0
+        ):
+            # Empty source: nothing was attempted, skipped, or succeeded.
+            empty_lines: list[str] = []
+            empty_lines.append("Migration complete — nothing to do")
+            empty_lines.append("Issues: 0 migrated")
+            empty_lines.append(f"Git: clone {clone_status}, push {push_status}")
+            _emit(empty_lines, use_error=False)
+            return
+
+        if succeeded_count <= 0:
+            # No failures, but no successes either (unreachable in normal
+            # runs: every attempt either succeeds or fails). Stay truthful
+            # and never claim "all migrated".
+            nosuccess_lines: list[str] = []
+            nosuccess_lines.append("Migration complete — nothing to do")
+            nosuccess_lines.append("Issues: 0 migrated")
+            nosuccess_lines.append(f"Git: clone {clone_status}, push {push_status}")
+            _emit(nosuccess_lines, use_error=False)
+            return
+
         success_lines: list[str] = []
         success_lines.append("Migration complete! All issues migrated.")
         success_lines.append(f"Issues: {issues_succeeded}/{issues_attempted} migrated")

@@ -127,6 +127,7 @@ class MigrationResult:
     issues_attempted: int = 0
     issues_succeeded: int = 0
     issues_failed: int = 0
+    issues_skipped: int = 0
     issues_discovered: int = 0
     comments_attempted: int = 0
     comments_succeeded: int = 0
