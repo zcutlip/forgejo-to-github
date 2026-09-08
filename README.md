@@ -19,7 +19,7 @@ Migrate a repository from [Codeberg](https://codeberg.org) / Forgejo to GitHub â
 
 ```bash
 # install the `f2gh` command
-pipx install .
+pipx install git+https://github.com/zcutlip/forgejo-to-github
 
 # ...or into the current environment
 pip install .
