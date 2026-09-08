@@ -29,8 +29,8 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
   - Always default to `--dry-run` when running CLI commands.
 
 ### B. Code Style & Architecture Standards
-- **Python Version**: Target Python 3.10+.
-- **Typing**: Use strict type hints (`typing` module or native Python 3.10+ annotations) on all function definitions.
+- **Python Version**: Target Python 3.12+.
+- **Typing**: Use strict type hints (`typing` module or native Python 3.12+ annotations) on all function definitions.
 - **Structure**:
   - Keep the script modular and lightweight.
   - State persistence must rely on simple, human-readable file storage (`state.json`) using atomic writes (`os.replace`) to avoid file corruption during abrupt exits.
@@ -42,7 +42,7 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
 - All tests **must** be run via `./scripts/run-tests.sh [pytest args...]`. The script handles virtualenv selection and activation, then passes all arguments through to `pytest`.
 - Before submitting PRs or finalizing changes, run:
   - `./scripts/run-tests.sh` for unit/integration test validation.
-  - `ruff check .` and `mypy f2gh.py` for static analysis and type safety.
+  - `ruff check .` and `mypy f2gh.py forgejo_to_github/` for static analysis and type safety.
 - Test external API integrations using mocked responses (`responses` or `unittest.mock`) to avoid hitting live APIs during routine test suite runs.
 
 ## 3. Enforced Workflow
@@ -50,6 +50,7 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
 - **Plan approval:** Code changes begin only after the user reviews/approves the plan. Developing a plan is not approval.
 - **TDD order:** Write tests first and establish RED, then implement to GREEN. Tests are the locked contract — never change tests to make an implementation pass.
 - **RED contract gaps:** If RED exposes a legitimate contract gap, stop and surface it. With user approval, amend the test, then stop again for user approval of the amended test before resuming GREEN.
+- **RED honesty:** A new test must fail for the contract reason. If it passes immediately, keep it only as a disclosed guard stating why it can't fail yet — never silently keep a vacuous pass.
 - **Stop gates:** User-held review checkpoints. After each substantive stage, stop for user review/approval. Final review and commit are performed by the user.
 - **No commits:** Unless you are the @commit agent, never commit, push, or stage-then-commit. Automated checks and delegate reports do not constitute user approval.
 - **Delegation tiers:** @lint and @commit are specialists and receive outcomes only — @commit is never without being explicitly directed by the user. @coder and @explore are generalists and may receive precise specifications.
@@ -61,6 +62,8 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
 - Identify each active plan's primary GitHub issue near the top of the plan; keep related issues under `References`.
 - Move completed plans to `plans/archive/` rather than deleting them.
 - Before closing a plan's issue, comment with the completing commit(s) and verification status.
+- **External voice for GitHub issues:** Write issues in problem/solution/verification terms for an outside reader. Never cite slice letters, RED/GREEN phases, stop gates, spec files, ledger sections, or memory IDs — those are internal workflow artifacts.
+- **Spec prose and locked tests move together:** When amending a locked test's contract (e.g., raising a threshold), amend the spec prose documenting the rule in the same change. A test-only amendment leaves the spec contradicting the test.
 - Treat `plans/02-package-refactor-and-test-foundation/` (the staged
   refactor specification under `refactor/00-index.md`) as the test and
   architecture foundation for later plans; do not implement later
