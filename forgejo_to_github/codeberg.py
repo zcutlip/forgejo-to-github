@@ -180,9 +180,7 @@ class CodebergClient:
         self._transport: Transport = (
             transport if transport is not None else RequestsTransport()
         )
-        self._timeout: float = (
-            DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout
-        )
+        self._timeout: float = DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout
 
     # --- properties ---------------------------------------------------------
 
@@ -230,45 +228,12 @@ class CodebergClient:
                 _redact(f"transport error contacting Codeberg: {exc}", self._token)
             ) from exc
 
-        status = getattr(response, "status_code", 0)
-        if status == 404:
-            raise CodebergNotFoundError(
-                f"issue {issue_id} not found on Codeberg",
-                url=url,
-                issue_number=issue_id,
-            )
-        if status in (401, 403):
-            raise CodebergAuthError(
-                _redact(
-                    f"authentication failure contacting Codeberg ({status})",
-                    self._token,
-                )
-            )
-        if status == 422:
-            raise CodebergValidationError(
-                "Codeberg rejected the request as invalid",
-                messages=_extract_messages(response),
-            )
-        if status == 429:
-            retry_after = _parse_retry_after(response)
-            raise CodebergRateLimitError(
-                "Codeberg rate limit exceeded",
-                retry_after=retry_after,
-            )
-        if 500 <= status < 600:
-            raise CodebergTransportError(
-                _redact(
-                    f"Codeberg server error {status} contacting {url}",
-                    self._token,
-                )
-            )
-        if not (200 <= status < 300):
-            raise CodebergTransportError(
-                _redact(
-                    f"unexpected status {status} contacting {url}",
-                    self._token,
-                )
-            )
+        self._raise_for_status(
+            response,
+            url,
+            not_found_message=f"issue {issue_id} not found on Codeberg",
+            issue_number=issue_id,
+        )
 
         try:
             comments = response.json()
@@ -318,47 +283,12 @@ class CodebergClient:
                 _redact(f"transport error contacting Codeberg: {exc}", self._token)
             ) from exc
 
-        status = getattr(response, "status_code", 0)
-        if status == 404:
-            raise CodebergNotFoundError(
-                f"issue {issue_number} not found on Codeberg",
-                url=url,
-                issue_number=issue_number,
-            )
-        if status in (401, 403):
-            raise CodebergAuthError(
-                _redact(
-                    f"authentication failure contacting Codeberg ({status})",
-                    self._token,
-                )
-            )
-        if status == 422:
-            raise CodebergValidationError(
-                "Codeberg rejected the request as invalid",
-                messages=_extract_messages(response),
-            )
-        if status == 429:
-            retry_after = _parse_retry_after(response)
-            raise CodebergRateLimitError(
-                "Codeberg rate limit exceeded",
-                retry_after=retry_after,
-            )
-        if 500 <= status < 600:
-            raise CodebergTransportError(
-                _redact(
-                    f"Codeberg server error {status} contacting {url}",
-                    self._token,
-                )
-            )
-        if not (200 <= status < 300):
-            # Unknown status — treat as transport error to avoid
-            # silently dropping an error response.
-            raise CodebergTransportError(
-                _redact(
-                    f"unexpected status {status} contacting {url}",
-                    self._token,
-                )
-            )
+        self._raise_for_status(
+            response,
+            url,
+            not_found_message=f"issue {issue_number} not found on Codeberg",
+            issue_number=issue_number,
+        )
 
         return response.json()
 
@@ -383,11 +313,39 @@ class CodebergClient:
                 _redact(f"transport error contacting Codeberg: {exc}", self._token)
             ) from exc
 
+        self._raise_for_status(
+            response,
+            url,
+            not_found_message=(
+                f"repository {self._owner}/{self._repo} not found on Codeberg"
+            ),
+            validation_message="Codeberg rejected the repository metadata request",
+        )
+
+        body = response.json()
+        description = body.get("description") if isinstance(body, dict) else None
+        if description is None:
+            return ""
+        return str(description)
+
+    # --- internals ----------------------------------------------------------
+
+    def _raise_for_status(
+        self,
+        response: Any,
+        url: str,
+        *,
+        not_found_message: str,
+        issue_number: int | None = None,
+        validation_message: str = "Codeberg rejected the request as invalid",
+    ) -> None:
+        """Translate a non-2xx response into the structured error hierarchy."""
         status = getattr(response, "status_code", 0)
         if status == 404:
             raise CodebergNotFoundError(
-                f"repository {self._owner}/{self._repo} not found on Codeberg",
+                not_found_message,
                 url=url,
+                issue_number=issue_number,
             )
         if status in (401, 403):
             raise CodebergAuthError(
@@ -398,13 +356,14 @@ class CodebergClient:
             )
         if status == 422:
             raise CodebergValidationError(
-                "Codeberg rejected the repository metadata request",
+                validation_message,
                 messages=_extract_messages(response),
             )
         if status == 429:
+            retry_after = _parse_retry_after(response)
             raise CodebergRateLimitError(
                 "Codeberg rate limit exceeded",
-                retry_after=_parse_retry_after(response),
+                retry_after=retry_after,
             )
         if 500 <= status < 600:
             raise CodebergTransportError(
@@ -414,20 +373,14 @@ class CodebergClient:
                 )
             )
         if not (200 <= status < 300):
+            # Unknown status — treat as transport error to avoid
+            # silently dropping an error response.
             raise CodebergTransportError(
                 _redact(
                     f"unexpected status {status} contacting {url}",
                     self._token,
                 )
             )
-
-        body = response.json()
-        description = body.get("description") if isinstance(body, dict) else None
-        if description is None:
-            return ""
-        return str(description)
-
-    # --- internals ----------------------------------------------------------
 
     def _paginate(self, path: str, base_params: dict[str, Any]) -> list[dict[str, Any]]:
         """Walk pages of a list endpoint until an empty page is returned.
@@ -456,43 +409,11 @@ class CodebergClient:
                     )
                 ) from exc
 
-            status = getattr(response, "status_code", 0)
-            if status == 404:
-                raise CodebergNotFoundError(
-                    f"resource not found at {url}",
-                    url=url,
-                )
-            if status in (401, 403):
-                raise CodebergAuthError(
-                    _redact(
-                        f"authentication failure contacting Codeberg ({status})",
-                        self._token,
-                    )
-                )
-            if status == 422:
-                raise CodebergValidationError(
-                    "Codeberg rejected the request as invalid",
-                    messages=_extract_messages(response),
-                )
-            if status == 429:
-                raise CodebergRateLimitError(
-                    "Codeberg rate limit exceeded",
-                    retry_after=_parse_retry_after(response),
-                )
-            if 500 <= status < 600:
-                raise CodebergTransportError(
-                    _redact(
-                        f"Codeberg server error {status} contacting {url}",
-                        self._token,
-                    )
-                )
-            if not (200 <= status < 300):
-                raise CodebergTransportError(
-                    _redact(
-                        f"unexpected status {status} contacting {url}",
-                        self._token,
-                    )
-                )
+            self._raise_for_status(
+                response,
+                url,
+                not_found_message=f"resource not found at {url}",
+            )
 
             page_items = response.json()
             if not page_items:
