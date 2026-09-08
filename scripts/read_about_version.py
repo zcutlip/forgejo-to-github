@@ -1,0 +1,1 @@
+../submodules/repo-mgmt-scripts/src/read_about_version.py
