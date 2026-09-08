@@ -64,7 +64,7 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
 - Before closing a plan's issue, comment with the completing commit(s) and verification status.
 - **External voice for GitHub issues:** Write issues in problem/solution/verification terms for an outside reader. Never cite slice letters, RED/GREEN phases, stop gates, spec files, ledger sections, or memory IDs — those are internal workflow artifacts.
 - **Spec prose and locked tests move together:** When amending a locked test's contract (e.g., raising a threshold), amend the spec prose documenting the rule in the same change. A test-only amendment leaves the spec contradicting the test.
-- Treat `plans/02-package-refactor-and-test-foundation/` (the staged
+- Treat `plans/archive/02-package-refactor-and-test-foundation/` (the staged
   refactor specification under `refactor/00-index.md`) as the test and
   architecture foundation for later plans; do not implement later
   cross-cutting features in the monolithic script first.
