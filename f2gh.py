@@ -7,6 +7,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+from forgejo_to_github import __version__
 from forgejo_to_github.about import about
 from forgejo_to_github.codeberg import CodebergClient
 from forgejo_to_github.domain import Repository
@@ -65,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--version",
         action="version",
-        version=description,
+        version=__version__,
         help="Show version and exit",
     )
     return parser.parse_args()

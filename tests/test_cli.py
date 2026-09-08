@@ -332,8 +332,8 @@ def test_parse_args_version_flag_prints_version_and_exits_zero(
 
     captured = capsys.readouterr()
     assert captured.out, "expected --version text on stdout"
-    assert about() in captured.out
-    assert __version__ in captured.out
+    # assert about() in captured.out
+    assert __version__ == captured.out.rstrip()
 
 
 def test_help_description_matches_version_string(
