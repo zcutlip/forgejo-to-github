@@ -246,7 +246,7 @@ class CodebergClient:
         if status == 429:
             retry_after = _parse_retry_after(response)
             raise CodebergRateLimitError(
-                "Codehub rate limit exceeded",
+                "Codeberg rate limit exceeded",
                 retry_after=retry_after,
             )
         if 500 <= status < 600:
