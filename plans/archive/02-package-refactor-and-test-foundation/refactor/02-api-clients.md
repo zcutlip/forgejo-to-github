@@ -180,6 +180,10 @@ The retry policy between attempts is implementation-defined
 Delay comes from `Retry-After` (or `X-RateLimit-Reset - now` when
 `Retry-After` is absent) plus additive jitter
 (`delay + random.uniform(0, _JITTER_SECONDS)`, `_JITTER_SECONDS = 1.0`).
+The base delay is capped at `_MAX_RATE_LIMIT_SLEEP` (60.0s) before
+jitter is added, preventing multi-hour sleeps on far-future
+`X-RateLimit-Reset` epochs (issue #8). The maximum actual sleep is
+`_MAX_RATE_LIMIT_SLEEP + _JITTER_SECONDS` (61.0s).
 Amendment (Slice B remediation, user-approved): an earlier amendment to
 this section codified "403 raises immediately"; that codified a
 regression against the pre-refactor baseline (`gh_request` retried both
