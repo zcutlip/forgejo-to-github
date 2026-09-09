@@ -48,8 +48,24 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
 ## 3. Enforced Workflow
 
 - **Plan approval:** Code changes begin only after the user reviews/approves the plan. Developing a plan is not approval.
-- **TDD order:** Write tests first and establish RED, then implement to GREEN. Tests are the locked contract — never change tests to make an implementation pass.
-- **RED contract gaps:** If RED exposes a legitimate contract gap, stop and surface it. With user approval, amend the test, then stop again for user approval of the amended test before resuming GREEN.
+- **TDD staged gates:** Spec/plan changes, test changes, and
+  implementation are separate approval stages, each ending in a stop:
+  1. **Spec/plan amendment:** make the spec or plan changes, then stop
+     for user approval. The user may commit manually or direct a
+     commit.
+  2. **RED:** once the spec/plan is approved and committed, make the
+     test changes (new tests, amended tests) and establish RED, then
+     stop for user approval. The user may commit manually or direct a
+     commit.
+  3. **GREEN:** only after the tests are approved and committed, do
+     the implementation work, then stop again for user review/commit.
+  4. **Contract-gap rewind:** if implementation reveals a test or
+     contract gap, returning to RED to amend a test is fine — request
+     approval before resuming GREEN.
+- **Tests lock the contract:** the spec/plan defines the contract the
+  tests will lock. Tests committed independently of implementation
+  detect inadvertent test/contract drift during implementation. Never
+  change tests to make an implementation pass.
 - **RED honesty:** A new test must fail for the contract reason. If it passes immediately, keep it only as a disclosed guard stating why it can't fail yet — never silently keep a vacuous pass.
 - **Stop gates:** User-held review checkpoints. After each substantive stage, stop for user review/approval. Final review is performed by the user.
 - **No autonomous commits:** Agents may commit only when the user explicitly prompts it in the current conversation. Never commit, push, or stage-then-commit unprompted — automated checks and delegate reports do not constitute user approval. Never prompt or remind the user that a commit could or should happen; commit opportunities are the user's to notice.
