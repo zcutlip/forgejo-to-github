@@ -51,8 +51,8 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
 - **TDD order:** Write tests first and establish RED, then implement to GREEN. Tests are the locked contract — never change tests to make an implementation pass.
 - **RED contract gaps:** If RED exposes a legitimate contract gap, stop and surface it. With user approval, amend the test, then stop again for user approval of the amended test before resuming GREEN.
 - **RED honesty:** A new test must fail for the contract reason. If it passes immediately, keep it only as a disclosed guard stating why it can't fail yet — never silently keep a vacuous pass.
-- **Stop gates:** User-held review checkpoints. After each substantive stage, stop for user review/approval. Final review and commit are performed by the user.
-- **No commits:** Unless you are the @commit agent, never commit, push, or stage-then-commit. Automated checks and delegate reports do not constitute user approval.
+- **Stop gates:** User-held review checkpoints. After each substantive stage, stop for user review/approval. Final review is performed by the user.
+- **No autonomous commits:** Agents may commit only when the user explicitly prompts it in the current conversation. Never commit, push, or stage-then-commit unprompted — automated checks and delegate reports do not constitute user approval. Never prompt or remind the user that a commit could or should happen; commit opportunities are the user's to notice.
 - **Delegation tiers:** @lint and @commit are specialists and receive outcomes only — @commit is never without being explicitly directed by the user. @coder and @explore are generalists and may receive precise specifications.
 
 
@@ -69,6 +69,25 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
   architecture foundation for later plans; do not implement later
   cross-cutting features in the monolithic script first.
 - Keep clone failures terminal; Git push failures may continue to issue migration; `--skip-git` is the explicit issue-only path.
+- **Branch workflow:** Do issue work on a dedicated branch named
+  `dev/<issue-number>-<short-slug>` (e.g. `dev/8-rate-limit-sleep-cap`).
+  Multi-issue plans use one branch named after the plan instead
+  (matches the historical `dev/003-package-refactor`). Branch from a
+  current `main`; one branch per issue or plan, never batch unrelated
+  issues onto one branch.
+- Commits happen on the branch, only when the user explicitly prompts
+  them (§3 No autonomous commits); merge, push, pull, and fetch remain
+  manual per §4.
+- **Merge, push, pull, and fetch are manual:** agents never merge,
+  push, pull, or fetch. Agents may create and switch *local* branches
+  only; everything touching other refs or remotes is performed by the
+  user.
+- Merge to `main` after the stop-gate review (done manually by the
+  user); delete the branch (local and origin) afterward —
+  `submodules/repo-mgmt-scripts/` `deletebranch` does both in one
+  pass.
+- Single-file trivial fixes may go directly to `main` at user
+  discretion; when in doubt, use a branch.
 
 ---
 
