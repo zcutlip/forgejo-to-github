@@ -54,6 +54,12 @@ _MAX_ATTEMPTS: int = 3
 # implementation-defined; the spec only requires the 3-attempt cap.
 _JITTER_SECONDS: float = 1.0
 
+# Maximum seconds to sleep on a rate-limited retry, regardless of what
+# Retry-After or X-RateLimit-Reset says. Prevents multi-hour wedges on
+# far-future reset epochs. Issue #8.
+_MAX_RATE_LIMIT_SLEEP: float = 60.0
+
+
 # GitHub's pinned REST API version. Surfaced on every request.
 _API_VERSION: str = "2022-11-28"
 
@@ -462,7 +468,9 @@ class GitHubClient:
                 retry_after = max(reset_epoch - int(time.time()), 1)
             else:
                 retry_after = 1
-        delay = float(retry_after) + random.uniform(0, _JITTER_SECONDS)
+        delay = min(float(retry_after), _MAX_RATE_LIMIT_SLEEP) + random.uniform(
+            0, _JITTER_SECONDS
+        )
         time.sleep(delay)
 
     def _rate_limit_error(self, response: Any) -> GitHubRateLimitError:

@@ -535,6 +535,35 @@ def test_rate_limit_429_is_retried_then_terminates_with_rate_limit_error() -> No
         assert 1.0 <= slept <= 2.0
 
 
+def test_rate_limit_sleep_capped_on_far_future_reset() -> None:
+    """A far-future Retry-After is capped at _MAX_RATE_LIMIT_SLEEP so
+    the migration does not sleep for hours. The sleep must not exceed
+    _MAX_RATE_LIMIT_SLEEP + _JITTER_SECONDS (61.0s).
+    """
+    from forgejo_to_github.github import _JITTER_SECONDS, _MAX_RATE_LIMIT_SLEEP
+
+    rate_limited = FakeResponse(
+        status_code=429,
+        json_payload={"message": "secondary rate limit"},
+        headers={"Retry-After": "3600"},
+    )
+    ok = FakeResponse(status_code=201, json_payload={"number": 7})
+    transport = FakeTransport(responses=[rate_limited, ok])
+    client = _client(transport)
+
+    sleep_calls: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        sleep_calls.append(s)
+
+    with patch("forgejo_to_github.github.time.sleep", side_effect=fake_sleep):
+        number = client.create_issue(title="t", body="b", labels=[])
+
+    assert number == 7
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] <= _MAX_RATE_LIMIT_SLEEP + _JITTER_SECONDS
+    assert sleep_calls[0] >= _MAX_RATE_LIMIT_SLEEP  # cap applied, not raw 3600
+
 def test_github_client_retry_includes_jitter() -> None:
     """A single 429 followed by success sleeps once: ``Retry-After``
     plus additive jitter in ``[0, _JITTER_SECONDS]`` (``_JITTER_SECONDS``
