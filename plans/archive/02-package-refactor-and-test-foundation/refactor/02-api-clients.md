@@ -182,7 +182,8 @@ Delay comes from `Retry-After` (or `X-RateLimit-Reset - now` when
 (`delay + random.uniform(0, _JITTER_SECONDS)`, `_JITTER_SECONDS = 1.0`).
 The base delay is capped at `_MAX_RATE_LIMIT_SLEEP` (60.0s) before
 jitter is added, preventing multi-hour sleeps on far-future
-`X-RateLimit-Reset` epochs (issue #8). The maximum actual sleep is
+`X-RateLimit-Reset` epochs (issue #8). Negative `Retry-After` values
+are floored at 1s, matching the epoch-path floor. The maximum actual sleep is
 `_MAX_RATE_LIMIT_SLEEP + _JITTER_SECONDS` (61.0s).
 Amendment (Slice B remediation, user-approved): an earlier amendment to
 this section codified "403 raises immediately"; that codified a
