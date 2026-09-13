@@ -468,6 +468,10 @@ class GitHubClient:
                 retry_after = max(reset_epoch - int(time.time()), 1)
             else:
                 retry_after = 1
+        else:
+            # Clamp negative header values to the 1s floor (issue #8),
+            # matching the epoch-path max(..., 1) behavior.
+            retry_after = max(retry_after, 1)
         delay = min(float(retry_after), _MAX_RATE_LIMIT_SLEEP) + random.uniform(
             0, _JITTER_SECONDS
         )
