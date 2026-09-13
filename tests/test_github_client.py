@@ -565,6 +565,33 @@ def test_rate_limit_sleep_capped_on_far_future_reset() -> None:
     assert sleep_calls[0] >= _MAX_RATE_LIMIT_SLEEP  # cap applied, not raw 3600
 
 
+def test_negative_retry_after_clamped_to_minimum() -> None:
+    """A negative ``Retry-After`` is clamped to the 1s floor (matching the
+    epoch-path ``max(..., 1)`` behavior) so ``time.sleep`` never receives
+    a negative delay and raises no ``ValueError``.
+    """
+    rate_limited = FakeResponse(
+        status_code=429,
+        json_payload={"message": "secondary rate limit"},
+        headers={"Retry-After": "-5"},
+    )
+    ok = FakeResponse(status_code=201, json_payload={"number": 7})
+    transport = FakeTransport(responses=[rate_limited, ok])
+    client = _client(transport)
+
+    sleep_calls: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        sleep_calls.append(s)
+
+    with patch("forgejo_to_github.github.time.sleep", side_effect=fake_sleep):
+        number = client.create_issue(title="t", body="b", labels=[])
+
+    assert number == 7
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] >= 1.0
+
+
 def test_github_client_retry_includes_jitter() -> None:
     """A single 429 followed by success sleeps once: ``Retry-After``
     plus additive jitter in ``[0, _JITTER_SECONDS]`` (``_JITTER_SECONDS``
