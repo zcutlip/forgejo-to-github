@@ -324,7 +324,7 @@ def test_cli_prompter_reads_stdin_when_yes_flag_unset() -> None:
 def test_parse_args_version_flag_prints_version_and_exits_zero(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """``--version`` must exit 0 and print the canonical about string to stdout."""
+    """``--version`` must exit 0 and print bare ``__version__`` to stdout."""
     with pytest.raises(SystemExit) as exc_info:
         _run_parse_args(["--version"])
 
@@ -332,14 +332,13 @@ def test_parse_args_version_flag_prints_version_and_exits_zero(
 
     captured = capsys.readouterr()
     assert captured.out, "expected --version text on stdout"
-    # assert about() in captured.out
     assert __version__ == captured.out.rstrip()
 
 
-def test_help_description_matches_version_string(
+def test_help_description_contains_about(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """``--help`` description and ``--version`` output share the canonical string."""
+    """``--help`` description contains ``about()``; ``--version`` prints bare ``__version__``."""
     with pytest.raises(SystemExit) as exc_info:
         _run_parse_args(["--help"])
 
