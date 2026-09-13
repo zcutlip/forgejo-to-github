@@ -347,3 +347,121 @@ def test_help_description_contains_about(
     captured = capsys.readouterr()
     assert captured.out, "expected --help text on stdout"
     assert about() in captured.out
+
+
+# ---------------------------------------------------------------------------
+# 8. KeyboardInterrupt handling in main()
+# ---------------------------------------------------------------------------
+
+
+def test_main_keyboard_interrupt_prints_resume_hint_and_exits_130(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An interrupted run reports the interrupt, points at saved state, and exits 130.
+
+    The message must name the source and target so the operator can resume
+    with the same arguments, and no traceback may leak to either stream.
+    """
+    args = argparse.Namespace(
+        source="owner/source",
+        target="owner/target",
+        dry_run=False,
+        yes=True,
+        skip_git=True,
+        public=False,
+        description=None,
+    )
+    fake_orchestrator = Mock()
+    fake_orchestrator.run.side_effect = KeyboardInterrupt
+
+    with (
+        patch.object(f2gh, "parse_args", return_value=args),
+        patch.object(f2gh, "_build_orchestrator", return_value=fake_orchestrator),
+        patch.object(f2gh.sys, "exit") as mock_exit,
+    ):
+        try:
+            f2gh.main()
+        except KeyboardInterrupt:
+            pytest.fail(
+                "main() let KeyboardInterrupt escape instead of handling it "
+                "and exiting 130"
+            )
+
+    mock_exit.assert_called_once_with(130)
+
+    captured = capsys.readouterr()
+    assert "Interrupted by user" in captured.err
+    assert "state saved to ./state.json" in captured.err
+    assert (
+        "resume with f2gh --source owner/source --target owner/target" in captured.err
+    )
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
+
+
+def test_main_keyboard_interrupt_dry_run_does_not_claim_state_saved(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A dry-run interrupt reports the interrupt but never claims state was saved.
+
+    Dry runs do not persist a checkpoint, so the notice must omit any
+    ``state saved`` claim while still exiting 130.
+    """
+    args = argparse.Namespace(
+        source="owner/source",
+        target="owner/target",
+        dry_run=True,
+        yes=True,
+        skip_git=True,
+        public=False,
+        description=None,
+    )
+    fake_orchestrator = Mock()
+    fake_orchestrator.run.side_effect = KeyboardInterrupt
+
+    with (
+        patch.object(f2gh, "parse_args", return_value=args),
+        patch.object(f2gh, "_build_orchestrator", return_value=fake_orchestrator),
+        patch.object(f2gh.sys, "exit") as mock_exit,
+    ):
+        try:
+            f2gh.main()
+        except KeyboardInterrupt:
+            pytest.fail(
+                "main() let KeyboardInterrupt escape instead of handling it "
+                "and exiting 130"
+            )
+
+    captured = capsys.readouterr()
+    assert "Interrupted by user" in captured.err
+    assert "state saved" not in captured.err.lower()
+    mock_exit.assert_called_once_with(130)
+
+
+def test_main_non_interrupt_exception_propagates() -> None:
+    """A non-interrupt exception from the orchestrator propagates unchanged.
+
+    Guards against the interrupt handler accidentally swallowing errors
+    other than ``KeyboardInterrupt``.
+    """
+    args = argparse.Namespace(
+        source="owner/source",
+        target="owner/target",
+        dry_run=False,
+        yes=True,
+        skip_git=True,
+        public=False,
+        description=None,
+    )
+    fake_orchestrator = Mock()
+    fake_orchestrator.run.side_effect = RuntimeError("boom")
+
+    with (
+        patch.object(f2gh, "parse_args", return_value=args),
+        patch.object(f2gh, "_build_orchestrator", return_value=fake_orchestrator),
+        patch.object(f2gh.sys, "exit") as mock_exit,
+        pytest.raises(RuntimeError),
+    ):
+        f2gh.main()
+
+    mock_exit.assert_not_called()
