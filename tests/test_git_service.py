@@ -53,6 +53,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1036,3 +1037,95 @@ def test_git_mirror_tempdir_prefix_uses_removesuffix_not_rstrip(
         f"expected slug 'tagging' (prefix 'f2gh-tagging-') vs mangled actual "
         f"{actual!r} (rstrip char-set over-strip of 'tagging.git' -> 'taggin')"
     )
+
+
+# ---------------------------------------------------------------------------
+# Clone tempdir cleanup on failure
+# ---------------------------------------------------------------------------
+
+
+def test_clone_failure_removes_tempdir_before_raising(tmp_path: Any) -> None:
+    """A clone that exits non-zero raises a ``GitCloneError``-shaped
+    exception and removes the tempdir it created, so no orphaned clone
+    directory is left behind on the failure path.
+    """
+    cpe = _make_cpe(
+        cmd=[
+            "git",
+            "clone",
+            "--mirror",
+            "https://codeberg.org/owner/repo.git",
+            "/tmp/f2gh-repo-0",
+        ],
+        stderr=(
+            "fatal: unable to access '...': "
+            "Could not resolve host: codeberg.org"
+        ),
+        returncode=128,
+    )
+    runner = _FakeRunner(responses={"clone": cpe})
+    fs_factory = _mkdtemp_under(tmp_path)
+
+    mirror = GitMirror(
+        source_url="https://codeberg.org/owner/repo.git",
+        target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
+        command_runner=runner,
+        tempdir_factory=fs_factory,
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        mirror.clone()
+
+    assert "GitCloneError" in type(exc_info.value).__name__
+    assert fs_factory.created
+    assert all(not Path(p).exists() for p in fs_factory.created)
+
+
+def test_clone_keyboard_interrupt_removes_tempdir_and_reraises(
+    tmp_path: Any,
+) -> None:
+    """A clone interrupted by ``KeyboardInterrupt`` re-raises the
+    interrupt and removes the tempdir it created, so no orphaned clone
+    directory survives an aborted clone.
+    """
+    runner = _FakeRunner(responses={"clone": KeyboardInterrupt()})
+    fs_factory = _mkdtemp_under(tmp_path)
+
+    mirror = GitMirror(
+        source_url="https://codeberg.org/owner/repo.git",
+        target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
+        command_runner=runner,
+        tempdir_factory=fs_factory,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        mirror.clone()
+
+    assert fs_factory.created
+    assert all(not Path(p).exists() for p in fs_factory.created)
+
+
+def test_clone_timeout_removes_tempdir_before_raising(tmp_path: Any) -> None:
+    """A clone that times out raises a timeout-shaped ``GitCloneError``
+    and removes the tempdir it created, so no orphaned clone directory is
+    left behind on the timeout path.
+    """
+    runner = _FakeRunner(timeout=True)
+    fs_factory = _mkdtemp_under(tmp_path)
+
+    mirror = GitMirror(
+        source_url="https://codeberg.org/owner/repo.git",
+        target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
+        command_runner=runner,
+        tempdir_factory=fs_factory,
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        mirror.clone()
+
+    assert "Timeout" in type(exc_info.value).__name__
+    assert fs_factory.created
+    assert all(not Path(p).exists() for p in fs_factory.created)
