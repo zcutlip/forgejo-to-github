@@ -370,7 +370,7 @@ def test_issue_failure_is_accumulated_and_later_issues_continue() -> None:
     reporter.render_final(result)
     combined = output.text() + "\n" + error.text()
     # Failure must be named: kind and CB number.
-    assert "CB #1" in combined or "CB # 1" in combined or "1" in combined
+    assert "CB #1" in combined or "CB # 1" in combined
     # Reporter must not claim complete success.
     assert "All issues migrated" not in combined
     assert "Migration complete! All issues migrated." not in combined

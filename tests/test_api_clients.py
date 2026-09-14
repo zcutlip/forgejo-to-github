@@ -242,7 +242,8 @@ def test_fetch_all_codeberg_issues_404_raises_not_found() -> None:
     with pytest.raises(CodebergNotFoundError) as exc_info:
         client.list_issues()
 
-    assert "owner/source" in str(exc_info.value) or exc_info.value.url != ""
+    assert "owner/source" in str(exc_info.value)
+    assert exc_info.value.url != ""
 
 
 def test_fetch_all_codeberg_issues_connection_error_propagates_as_transport() -> None:
@@ -254,9 +255,7 @@ def test_fetch_all_codeberg_issues_connection_error_propagates_as_transport() ->
     with pytest.raises(CodebergTransportError) as exc_info:
         client.list_issues()
 
-    assert "Could not resolve" in str(exc_info.value) or isinstance(
-        exc_info.value, CodebergTransportError
-    )
+    assert "Could not resolve" in str(exc_info.value)
 
 
 def test_fetch_all_codeberg_issues_timeout_propagates_as_transport() -> None:

@@ -128,7 +128,7 @@ class _FakeState:
 
 class _FakeReport:
     def __init__(self) -> None:
-        self.events: list[tuple[str, ...]] = []
+        self.events: list[tuple[str | None, ...]] = []
 
     def issue_started(self, n: int) -> None:
         self.events.append(("started", str(n)))
@@ -136,8 +136,10 @@ class _FakeReport:
     def issue_succeeded(self, src: int, gh: int) -> None:
         self.events.append(("succeeded", str(src), str(gh)))
 
-    def issue_failed(self, src: int, reason: str) -> None:
-        self.events.append(("failed", str(src), reason))
+    def issue_failed(
+        self, source_number: int, kind: str, message: str | None = None
+    ) -> None:
+        self.events.append(("issue_failed", str(source_number), kind, message))
 
     def git_phase_finished(self, status: str) -> None:
         self.events.append(("git", status))
@@ -236,15 +238,15 @@ def test_orchestrator_propagates_codeberg_404_without_traceback() -> None:
         def __init__(self) -> None:
             self.calls: list[str] = []
 
-        def create_issue(self, payload: dict[str, Any]) -> dict[str, Any]:
+        def create_issue(
+            self, title: str, body: str, labels: list[str]
+        ) -> int:
             self.calls.append("create_issue")
-            return {"number": 1}
+            return 1
 
-        def create_comment(
-            self, issue_number: int, payload: dict[str, Any]
-        ) -> dict[str, Any]:
+        def create_comment(self, issue_number: int, body: str) -> int:
             self.calls.append("create_comment")
-            return {"id": 1}
+            return 1
 
     fake_codeberg = _FakeCodeberg404(not_found)
     fake_github = _FakeGitHub()

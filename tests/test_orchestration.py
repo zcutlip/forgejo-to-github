@@ -296,11 +296,11 @@ def _build(
 
 
 def test_orchestrator_constructor_accepts_injected_dependencies():
-    """All five seams (repo, api, git, state, report) are constructor args.
+    """Wiring smoke test: the constructor accepts the five required seams.
 
-    The refactor's contract is dependency injection: each seam must be
-    supplied explicitly so that tests can replace any one of them with
-    a fake without monkey-patching module-level globals.
+    The real assertion is the constructor call itself (kwarg names pinned
+    by the call). The follow-up ``fakes[...] is not None`` checks verify
+    the test helper returned the expected shape, not production behavior.
     """
     orch, fakes = _build(issues=[])
 
@@ -436,12 +436,6 @@ def test_create_issue_runs_before_comments_and_checkpoint():
     orch.run()
 
     # For issue 1, create must come before any of its comments.
-    _ = [
-        c
-        for c in api.calls
-        if c[0] in {"create_issue", "create_comment"}
-        and (len(c) < 2 or c[1] == "1" or (len(c) >= 3 and c[1] == "1"))
-    ]
     create_index = next(
         i for i, c in enumerate(api.calls) if c[0] == "create_issue" and c[1] == "1"
     )

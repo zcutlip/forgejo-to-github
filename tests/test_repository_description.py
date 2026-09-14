@@ -104,7 +104,7 @@ def _codeberg_client(transport: FakeTransport) -> CodebergClient:
         base_url="https://codeberg.org",
         owner="acme",
         repo="widgets",
-        token="tok",
+        token="super-secret-token",
         transport=transport,
     )
 
@@ -258,7 +258,7 @@ def test_codeberg_metadata_transport_exception_raises_transport_error() -> None:
         client.get_repository_description()
 
     # Token must not leak.
-    assert "tok" not in str(excinfo.value) or "<redacted>" in str(excinfo.value) or True
+    assert "super-secret-token" not in str(excinfo.value)
 
 
 def test_codeberg_metadata_401_raises_auth_error() -> None:

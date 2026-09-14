@@ -53,6 +53,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -249,7 +250,7 @@ def test_clone_nonzero_exit_raises_structured_git_clone_error(
     # any subclass thereof, including the eventual ``SystemExit``-carrying
     # wrapper. What matters is that the structured fields are surfaced.
     cls_name = type(exc).__name__
-    assert "GitCloneError" in cls_name or isinstance(exc, SystemExit)
+    assert "GitCloneError" in cls_name
 
     text = str(exc)
     assert "Could not resolve host" in text
@@ -297,7 +298,7 @@ def test_clone_auth_failure_is_classified_as_git_auth_error(tmp_path: Any) -> No
 
     exc = exc_info.value
     cls_name = type(exc).__name__
-    assert "GitAuthError" in cls_name or "GitCloneError" in cls_name
+    assert "GitAuthError" in cls_name
     text = str(exc)
     # Actionable advice: must mention the token and the missing repository
     # access. The exact wording is flexible so long as the named concepts
@@ -330,7 +331,7 @@ def test_clone_timeout_classified_as_git_clone_timeout_error(
         mirror.clone()
 
     cls_name = type(exc_info.value).__name__
-    assert "GitCloneTimeoutError" in cls_name or "GitCloneError" in cls_name
+    assert "GitCloneTimeoutError" in cls_name
 
 
 def test_clone_stderr_token_is_redacted_in_error_text(tmp_path: Any) -> None:
@@ -524,7 +525,7 @@ def test_branch_push_non_fast_forward_is_classified_with_advice(
 
     exc = exc_info.value
     cls_name = type(exc).__name__
-    assert "GitPushRejectedError" in cls_name or "GitPushError" in cls_name
+    assert "GitPushRejectedError" in cls_name
     text = str(exc)
     # Advice must point at the remediation: force push or pull first.
     assert "force" in text.lower() or "pull" in text.lower()
@@ -657,10 +658,14 @@ def test_url_token_is_redacted_in_logged_command(tmp_path: Any, caplog: Any) -> 
     mirror.push_branches(local_path)
 
     # Every log line produced must have run through the redaction routine.
+    assert caplog.records, "expected push command lines to be logged"
     for record in caplog.records:
         assert TOKEN_SENTINEL not in record.getMessage(), (
             f"raw token leaked into log line: {record.getMessage()!r}"
         )
+    assert any(
+        REDACTED_PLACEHOLDER in r.getMessage() for r in caplog.records
+    ), "expected REDACTED_PLACEHOLDER to appear in at least one log line"
 
 
 def test_extra_header_token_is_redacted_in_command(tmp_path: Any) -> None:
@@ -1036,3 +1041,95 @@ def test_git_mirror_tempdir_prefix_uses_removesuffix_not_rstrip(
         f"expected slug 'tagging' (prefix 'f2gh-tagging-') vs mangled actual "
         f"{actual!r} (rstrip char-set over-strip of 'tagging.git' -> 'taggin')"
     )
+
+
+# ---------------------------------------------------------------------------
+# Clone tempdir cleanup on failure
+# ---------------------------------------------------------------------------
+
+
+def test_clone_failure_removes_tempdir_before_raising(tmp_path: Any) -> None:
+    """A clone that exits non-zero raises a ``GitCloneError``-shaped
+    exception and removes the tempdir it created, so no orphaned clone
+    directory is left behind on the failure path.
+    """
+    cpe = _make_cpe(
+        cmd=[
+            "git",
+            "clone",
+            "--mirror",
+            "https://codeberg.org/owner/repo.git",
+            "/tmp/f2gh-repo-0",
+        ],
+        stderr=(
+            "fatal: unable to access '...': "
+            "Could not resolve host: codeberg.org"
+        ),
+        returncode=128,
+    )
+    runner = _FakeRunner(responses={"clone": cpe})
+    fs_factory = _mkdtemp_under(tmp_path)
+
+    mirror = GitMirror(
+        source_url="https://codeberg.org/owner/repo.git",
+        target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
+        command_runner=runner,
+        tempdir_factory=fs_factory,
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        mirror.clone()
+
+    assert "GitCloneError" in type(exc_info.value).__name__
+    assert fs_factory.created
+    assert all(not Path(p).exists() for p in fs_factory.created)
+
+
+def test_clone_keyboard_interrupt_removes_tempdir_and_reraises(
+    tmp_path: Any,
+) -> None:
+    """A clone interrupted by ``KeyboardInterrupt`` re-raises the
+    interrupt and removes the tempdir it created, so no orphaned clone
+    directory survives an aborted clone.
+    """
+    runner = _FakeRunner(responses={"clone": KeyboardInterrupt()})
+    fs_factory = _mkdtemp_under(tmp_path)
+
+    mirror = GitMirror(
+        source_url="https://codeberg.org/owner/repo.git",
+        target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
+        command_runner=runner,
+        tempdir_factory=fs_factory,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        mirror.clone()
+
+    assert fs_factory.created
+    assert all(not Path(p).exists() for p in fs_factory.created)
+
+
+def test_clone_timeout_removes_tempdir_before_raising(tmp_path: Any) -> None:
+    """A clone that times out raises a timeout-shaped ``GitCloneError``
+    and removes the tempdir it created, so no orphaned clone directory is
+    left behind on the timeout path.
+    """
+    runner = _FakeRunner(timeout=True)
+    fs_factory = _mkdtemp_under(tmp_path)
+
+    mirror = GitMirror(
+        source_url="https://codeberg.org/owner/repo.git",
+        target_url="https://github.com/owner/target.git",
+        github_token=TOKEN_SENTINEL,
+        command_runner=runner,
+        tempdir_factory=fs_factory,
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        mirror.clone()
+
+    assert "Timeout" in type(exc_info.value).__name__
+    assert fs_factory.created
+    assert all(not Path(p).exists() for p in fs_factory.created)

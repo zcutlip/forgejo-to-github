@@ -509,54 +509,64 @@ class GitMirror:
         any attached command-line text are run through
         :func:`redact_token` so the GitHub token never leaks.
 
-        The tempdir is **not** cleaned up here; that is the caller's
-        responsibility, exercised via :meth:`cleanup`.
+        On success the tempdir is returned and remains the caller's
+        responsibility to clean up via :meth:`cleanup`. On any failure
+        (timeout, non-zero exit, or interrupt), ``clone`` removes the
+        tempdir before the exception propagates.
         """
         local_path = self._tempdir_factory(prefix=self._tempdir_prefix())
         argv = ["git", "clone", "--mirror", self._source_url, local_path]
+        success = False
         try:
-            self._run(argv)
-        except subprocess.TimeoutExpired as exc:
-            cmd_str = _argv_as_string(argv)
-            sanitized_cmd = redact_token(cmd_str, self._github_token)
-            raw_timeout_stderr: str | bytes | None = exc.stderr
-            if isinstance(raw_timeout_stderr, bytes):
-                raw_timeout_stderr = raw_timeout_stderr.decode(
-                    "utf-8", errors="replace"
+            try:
+                self._run(argv)
+            except subprocess.TimeoutExpired as exc:
+                cmd_str = _argv_as_string(argv)
+                sanitized_cmd = redact_token(cmd_str, self._github_token)
+                raw_timeout_stderr: str | bytes | None = exc.stderr
+                if isinstance(raw_timeout_stderr, bytes):
+                    raw_timeout_stderr = raw_timeout_stderr.decode(
+                        "utf-8", errors="replace"
+                    )
+                if not isinstance(raw_timeout_stderr, str):
+                    raw_timeout_stderr = ""
+                sanitized_stderr = redact_token(
+                    raw_timeout_stderr, self._github_token
                 )
-            if not isinstance(raw_timeout_stderr, str):
-                raw_timeout_stderr = ""
-            sanitized_stderr = redact_token(raw_timeout_stderr, self._github_token)
-            advisory = _clone_advisory(sanitized_stderr, exit_code=None)
-            raise GitCloneTimeoutError(
-                f"git clone timed out after {exc.timeout}s\n"
-                f"  command: {sanitized_cmd}\n"
-                f"  stderr: {sanitized_stderr}\n"
-                f"  {advisory}",
-                cmd=argv,
-                stderr=sanitized_stderr,
-                timeout=exc.timeout,
-            ) from exc
-        except subprocess.CalledProcessError as exc:
-            cmd_str = _argv_as_string(exc.cmd)
-            sanitized_cmd = redact_token(cmd_str, self._github_token)
-            raw_stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-            sanitized_stderr = redact_token(raw_stderr, self._github_token)
-            cls = _classify_clone_stderr(sanitized_stderr)
-            advisory = _clone_advisory(sanitized_stderr, exit_code=exc.returncode)
-            message = (
-                f"git clone failed (exit code {exc.returncode})\n"
-                f"  command: {sanitized_cmd}\n"
-                f"  stderr: {sanitized_stderr}\n"
-                f"  {advisory}"
-            )
-            raise cls(
-                message,
-                cmd=argv,
-                stderr=sanitized_stderr,
-            ) from exc
+                advisory = _clone_advisory(sanitized_stderr, exit_code=None)
+                raise GitCloneTimeoutError(
+                    f"git clone timed out after {exc.timeout}s\n"
+                    f"  command: {sanitized_cmd}\n"
+                    f"  stderr: {sanitized_stderr}\n"
+                    f"  {advisory}",
+                    cmd=argv,
+                    stderr=sanitized_stderr,
+                    timeout=exc.timeout,
+                ) from exc
+            except subprocess.CalledProcessError as exc:
+                cmd_str = _argv_as_string(exc.cmd)
+                sanitized_cmd = redact_token(cmd_str, self._github_token)
+                raw_stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+                sanitized_stderr = redact_token(raw_stderr, self._github_token)
+                cls = _classify_clone_stderr(sanitized_stderr)
+                advisory = _clone_advisory(sanitized_stderr, exit_code=exc.returncode)
+                message = (
+                    f"git clone failed (exit code {exc.returncode})\n"
+                    f"  command: {sanitized_cmd}\n"
+                    f"  stderr: {sanitized_stderr}\n"
+                    f"  {advisory}"
+                )
+                raise cls(
+                    message,
+                    cmd=argv,
+                    stderr=sanitized_stderr,
+                ) from exc
 
-        return local_path
+            success = True
+            return local_path
+        finally:
+            if not success:
+                self.cleanup(local_path)
 
     def push_branches(self, local_path: str) -> None:
         """Push all branches in one command.

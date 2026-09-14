@@ -18,6 +18,9 @@ from forgejo_to_github.reporting import Reporter
 from forgejo_to_github.state import StateStore
 from forgejo_to_github.transport import RequestsTransport
 
+# SIGINT convention: 128 + signal number (SIGINT = 2).
+EXIT_INTERRUPTED = 130
+
 
 def parse_args() -> argparse.Namespace:
     description = about()
@@ -195,20 +198,28 @@ def _build_orchestrator(args: argparse.Namespace) -> MigrationOrchestrator:
 
 def main() -> None:
     args = parse_args()
-    orchestrator = _build_orchestrator(args)
-    result = orchestrator.run()
-    # Reporter is owned by the orchestrator; render final summary via it.
-    reporter = getattr(orchestrator, "reporter", None)
-    if reporter is None:
-        reporter = getattr(orchestrator, "report", None)
-    if reporter is None:
-        reporter = Reporter()
-    reporter.render_final(result)
-    sys.exit(reporter.exit_outcome(result))
+    try:
+        orchestrator = _build_orchestrator(args)
+        result = orchestrator.run()
+        # Reporter is owned by the orchestrator; render final summary via it.
+        reporter = getattr(orchestrator, "reporter", None)
+        if reporter is None:
+            reporter = getattr(orchestrator, "report", None)
+        if reporter is None:
+            reporter = Reporter()
+        reporter.render_final(result)
+        sys.exit(reporter.exit_outcome(result))
+    except KeyboardInterrupt:
+        if args.dry_run:
+            print("Interrupted by user.", file=sys.stderr)
+        else:
+            print(
+                "Interrupted by user — state saved to ./state.json, "
+                f"resume with f2gh --source {args.source} --target {args.target}",
+                file=sys.stderr,
+            )
+        sys.exit(EXIT_INTERRUPTED)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("Terminating.", file=sys.stderr)
+    main()
