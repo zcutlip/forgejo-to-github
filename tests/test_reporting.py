@@ -203,9 +203,9 @@ def test_report_names_every_failure_exactly_once():
 
     text = sink.text()
     # The reporter must expose a structured failure count. The
-    # assertion is on the count being present and equal to the input.
-    assert text.count("3") >= 1, (
-        "expected the failure count '3' to appear at least once; got:\n" + text
+    # assertion is on the labeled count being present and equal to the input.
+    assert "3 failed" in text.lower(), (
+        "expected the labeled failure count '3 failed' to appear; got:\n" + text
     )
 
 
