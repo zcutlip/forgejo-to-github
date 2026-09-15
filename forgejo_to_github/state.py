@@ -39,6 +39,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from filelock import FileLock, Timeout
+
 # Top-level keys accepted on the on-disk state file. Any other key
 # triggers a ``StateLoadError``. This set is part of the public contract;
 # adding a new key is an explicit change to the format.
@@ -51,6 +53,11 @@ ACCEPTED_KEYS: frozenset[str] = frozenset(
 # value are rejected. Bumping this is an explicit, breaking change to
 # the on-disk format and requires updating the migration story.
 _CURRENT_VERSION: int = 1
+
+# Probe written by :func:`_probe_round_trip` to prove the state directory
+# accepts and returns bytes before a run is allowed to mutate anything.
+_PROBE_NAME = ".f2gh-state-probe"
+_PROBE_PAYLOAD = "f2gh state probe\n"
 
 
 # --- domain value objects ---------------------------------------------------
@@ -142,6 +149,21 @@ class StateWriteError(Exception):
         return self.reason
 
 
+class StateLockedError(Exception):
+    """Raised when the state path is already held by another run.
+
+    A sibling of :class:`StateWriteError` rather than a subclass: lock
+    contention is not a write failure, and callers must be able to tell
+    "another run holds this path" apart from "this path cannot be written".
+
+    Carries ``state_path``, the resolved path whose lock could not be taken.
+    """
+
+    def __init__(self, state_path: Path) -> None:
+        super().__init__(f"state path is held by another f2gh run: {state_path}")
+        self.state_path: Path = state_path
+
+
 # --- StateStore --------------------------------------------------------------
 
 
@@ -172,6 +194,7 @@ class StateStore:
         self._state_path: Path = Path(state_path)
         self._source: str = source
         self._target: str = target
+        self._lock: FileLock | None = None
 
     # --- properties ----------------------------------------------------------
 
@@ -343,7 +366,57 @@ class StateStore:
         }
         _atomic_write_json(self._state_path, payload)
 
+    def prepare(self) -> None:
+        """Establish the state path for this run before anything is mutated.
+
+        Creates the state file's parent directories, proves the directory
+        round-trips bytes (not merely that a file can be created), and takes
+        the per-migration run lock. Raises :class:`StateWriteError` when the
+        path cannot be created or verified, and :class:`StateLockedError`
+        when another run already holds it.
+        """
+        parent = self._state_path.parent
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+            _probe_round_trip(parent)
+        except OSError as exc:
+            reason = exc.strerror or f"OS error preparing state path ({exc.errno})"
+            raise StateWriteError(self._state_path, reason, original=exc) from exc
+
+        lock = FileLock(
+            self._lock_path,
+            timeout=0,
+            fallback_to_soft=False,
+            preserve_lock_file=True,
+        )
+        try:
+            lock.acquire()
+        except Timeout as exc:
+            raise StateLockedError(self._state_path) from exc
+        self._lock = lock
+
+    def release(self) -> None:
+        """Drop the run lock.
+
+        Idempotent, and safe to call without a prior ``prepare``. The lock
+        file is deliberately left on disk: unlinking it would race with
+        another process acquiring it, and its presence means nothing once
+        the lock itself is gone.
+        """
+        lock = self._lock
+        self._lock = None
+        if lock is not None:
+            try:
+                lock.release()
+            except OSError:
+                pass
+
     # --- helpers -------------------------------------------------------------
+
+    @property
+    def _lock_path(self) -> Path:
+        """The run-lock file, beside the state file and per-migration."""
+        return self._state_path.with_name(self._state_path.name + ".lock")
 
     def _fresh_state(self) -> dict[str, object]:
         """Return a fresh default state for this store's identity.
@@ -370,6 +443,46 @@ class StateStore:
 # --- module-private helpers -------------------------------------------------
 
 
+def _probe_round_trip(directory: Path) -> None:
+    """Write a probe into ``directory``, read it back, and remove it.
+
+    Confirms the directory accepts and returns bytes, which a bare
+    existence or creatability check would not. Raises ``OSError`` when the
+    bytes do not come back as written.
+    """
+    probe = directory / _PROBE_NAME
+    try:
+        probe.write_text(_PROBE_PAYLOAD, encoding="utf-8")
+        if probe.read_text(encoding="utf-8") != _PROBE_PAYLOAD:
+            raise OSError("state directory did not return the probe bytes")
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Fsync ``directory`` so a rename into it survives a power loss.
+
+    POSIX only: Windows exposes no way to fsync a directory through ``os``,
+    so this is skipped there. Best-effort by design — a write that has
+    already landed is not failed over a durability hint.
+    """
+    if os.name != "posix":
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
     """Write ``payload`` to ``path`` atomically.
 
@@ -377,7 +490,9 @@ def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
     ``indent=2`` and ``sort_keys=True`` for human readability, append a
     trailing newline, ``fsync`` the temp file, then ``os.replace`` the
     temp file onto the destination. ``os.replace`` is atomic on POSIX
-    and on Windows when the destination is on the same filesystem.
+    and on Windows when the destination is on the same filesystem. After
+    the rename the parent directory is fsynced so the rename itself is
+    durable across a power loss.
 
     Raises :class:`StateWriteError` on any ``OSError``. The exception
     message is constructed from ``exc.strerror`` (or a generic phrase
@@ -392,6 +507,7 @@ def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_path, path)
+        _fsync_directory(path.parent)
     except OSError as exc:
         # Best-effort cleanup of the orphan temp file. A failure here
         # is not the primary error; surface the original write failure.
