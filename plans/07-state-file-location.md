@@ -165,6 +165,11 @@ Written before implementation:
 8. `tests/test_orchestration.py` — `run()` calls `prepare()` before the
    first mutating phase: when `prepare()` raises, no repository-create
    call is made.
+9. `tests/test_orchestration.py` — a state directory removed partway
+   through a run (after the preflight, before the next checkpoint) is
+   recreated by the writer backstop and the run completes. This is the
+   end-to-end proof that Decisions H and I hold through a real run, not
+   merely through a direct `save()` call.
 
 ## References
 
