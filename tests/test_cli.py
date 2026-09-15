@@ -553,6 +553,7 @@ def test_main_refuses_to_start_when_the_state_path_is_unusable(
 
     captured = capsys.readouterr()
     assert str(unreachable) in captured.err
+    assert "nothing was migrated" not in captured.err
     assert "Migration complete" not in captured.out
     assert "Traceback" not in captured.err
     assert "Traceback" not in captured.out
@@ -596,4 +597,5 @@ def test_main_reports_lock_contention_distinctly(
     unusable = _stderr_for(StateWriteError(state_path, "permission denied"))
 
     assert str(state_path) in contention
+    assert "nothing was migrated" not in contention
     assert contention != unusable
