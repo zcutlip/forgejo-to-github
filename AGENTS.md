@@ -45,6 +45,7 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
   - `./scripts/run-tests.sh` for unit/integration test validation.
   - `ruff check .` and `mypy f2gh.py forgejo_to_github/` for static analysis and type safety.
 - Test external API integrations using mocked responses (`responses` or `unittest.mock`) to avoid hitting live APIs during routine test suite runs.
+- When a persisted schema keeps or gains a field, require a test asserting its producer-driven value, not just its store round-trip. A store that faithfully persists whatever it is handed still passes when the producer hands it the wrong value; only an end-to-end assertion through the producing code path catches that.
 
 ## 3. Enforced Workflow
 
@@ -76,10 +77,10 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
   fresh RED/GREEN cycle**: there is no "RED reopen" for new work;
   "reopen RED" applies only when amending an already-committed test within
   an in-flight issue.
-- **RED honesty:** A new test must fail for the contract reason. If it passes immediately, keep it only as a disclosed guard stating why it can't fail yet — never silently keep a vacuous pass.
+- **RED honesty:** A new test must fail for the contract reason. If it passes immediately, keep it only as a disclosed guard stating why it can't fail yet — never silently keep a vacuous pass. Importing a not-yet-existing symbol, failing collection for the whole file, is an accepted RED shape here (not something to work around with lazy imports).
 - **Stop gates:** User-held review checkpoints. After each substantive stage, stop for user review/approval. Final review is performed by the user.
 - **No autonomous commits:** Agents may commit only when the user explicitly prompts it in the current conversation. Never commit, push, or stage-then-commit unprompted — automated checks and delegate reports do not constitute user approval. Never prompt or remind the user that a commit could or should happen; commit opportunities are the user's to notice.
-- **Delegation tiers:** @lint and @commit are specialists and receive outcomes only — @commit is never without being explicitly directed by the user. @coder and @explore are generalists and may receive precise specifications.
+- **Delegation tiers:** @lint and @commit are specialists and receive outcomes only — @commit is never without being explicitly directed by the user. @coder and @explore are generalists and may receive precise specifications. When parallel delegates disagree, or a delegate's claim gates what you report, re-run it yourself before reporting rather than trusting either report.
 
 
 ## 4. Planning and Issue Workflow
