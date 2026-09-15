@@ -2410,3 +2410,20 @@ def test_run_preflight_failure_aborts_before_repository_create():
 
     assert "check_repository_exists" not in api.calls
     assert "create_repository" not in api.calls
+
+
+def test_completed_run_releases_the_state_lock(tmp_path):
+    """A finished run leaves the state path free for the next one.
+
+    ``run()`` drops the lock in a ``finally``, so it cannot outlive the
+    migration. A fresh store on the same path must be able to prepare.
+    """
+    state_path = tmp_path / "state.json"
+    store = StateStore(state_path, "owner/source", "owner/target")
+    orch, _fakes = _build(issues=[], state=store)
+
+    orch.run()
+
+    resumed = StateStore(state_path, "owner/source", "owner/target")
+    resumed.prepare()
+    resumed.release()
