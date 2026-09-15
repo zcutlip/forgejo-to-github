@@ -140,6 +140,23 @@ class _FakeApi:
         self._fail_list_comments_numbers.add(int(issue_number))
 
 
+class _CreatingApi(_FakeApi):
+    """GitHub seam reporting the target missing, recording creation."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.create_calls: list[tuple[str, Any, bool]] = []
+
+    def check_repository_exists(self) -> None:
+        return None
+
+    def create_repository(
+        self, name: str, description: str | None, public: bool
+    ) -> dict[str, Any]:
+        self.create_calls.append((name, description, public))
+        return {}
+
+
 class _FakeGit:
     """Stand-in for the Git mirror service.
 
@@ -2135,6 +2152,24 @@ class _PersistingSpyStateStore(StateStore):
         super().save(repo_created, git_pushed, migrated)
 
 
+class _FlakySaveStore(_PersistingSpyStateStore):
+    """Concrete store whose saves can be made to fail from a chosen point."""
+
+    def __init__(self, state_path: Path) -> None:
+        super().__init__(state_path)
+        self.fail_saves = False
+
+    def save(
+        self,
+        repo_created: bool,
+        git_pushed: bool,
+        migrated: dict[int, int],
+    ) -> None:
+        if self.fail_saves:
+            raise StateWriteError(self._state_path, "simulated save failure")
+        super().save(repo_created, git_pushed, migrated)
+
+
 def test_issues_attempted_excludes_resumed_issues() -> None:
     """A resume-skipped issue must not count toward issues_attempted.
 
@@ -2427,3 +2462,124 @@ def test_completed_run_releases_the_state_lock(tmp_path):
     resumed = StateStore(state_path, "owner/source", "owner/target")
     resumed.prepare()
     resumed.release()
+
+
+# ===========================================================================
+# Repository-created recording and state-write error propagation (append-only)
+# ===========================================================================
+#
+# Contract (plan 07 target-creation scope, plan 08 items 1-4): a run that
+# creates the target repository records ``repo_created=True`` in the
+# checkpoint, and a ``StateWriteError`` raised by the state seam must
+# propagate out of ``run`` rather than being swallowed by the best-effort
+# checkpoint wrappers.
+
+
+def test_repo_created_is_recorded_when_the_target_repository_is_created(
+    tmp_path: Path,
+) -> None:
+    """When this run creates the target repository, the checkpoint says so."""
+    state = _PersistingSpyStateStore(tmp_path / "state.json")
+    api = _CreatingApi(issues=[_issue(1)])
+    orch, fakes = _build(issues=[_issue(1)], api=api, state=state)
+    fakes["repo"].yes = True
+
+    orch.run()
+
+    assert api.create_calls, "the target repository should have been created"
+    assert state.save_calls, "a checkpoint should have been written"
+    assert state.save_calls[-1][0] is True, (
+        f"repo_created must be recorded as True; got {state.save_calls!r}"
+    )
+    assert state.load()["repo_created"] is True
+
+
+class _ArmAfterFirstSaveStore(_PersistingSpyStateStore):
+    """Concrete store that raises on every save after the first."""
+
+    def save(
+        self,
+        repo_created: bool,
+        git_pushed: bool,
+        migrated: dict[int, int],
+    ) -> None:
+        if self.save_calls:
+            raise StateWriteError(self._state_path, "simulated save failure")
+        super().save(repo_created, git_pushed, migrated)
+
+
+def test_state_write_error_propagates_from_the_push_checkpoint(tmp_path: Path) -> None:
+    """A failing push checkpoint aborts the run with the store's error."""
+    state = _FlakySaveStore(tmp_path / "state.json")
+    state.fail_saves = True
+    orch, _fakes = _build(api=_FakeApi(issues=[_issue(1)]), state=state)
+
+    with pytest.raises(StateWriteError):
+        orch.run()
+
+
+def test_state_write_error_propagates_from_the_issue_checkpoint(tmp_path: Path) -> None:
+    """A failing issue checkpoint aborts before later issues are created."""
+    state = _ArmAfterFirstSaveStore(tmp_path / "state.json")
+    api = _FakeApi(issues=[_issue(1), _issue(2)])
+    orch, _fakes = _build(api=api, state=state)
+
+    with pytest.raises(StateWriteError):
+        orch.run()
+
+    create_calls = [call for call in api.calls if call[0] == "create_issue"]
+    assert [call[1] for call in create_calls] == ["1"], (
+        "the failing checkpoint must abort before the second issue is "
+        f"created; got {create_calls!r}"
+    )
+
+
+class _LegacyRecordIssueRaises:
+    """Legacy state seam (no load/save) whose record_issue raises."""
+
+    def already_migrated(self, source_number: int) -> bool:
+        return False
+
+    def record_issue(self, source_number: int, github_number: int) -> None:
+        raise StateWriteError(Path("state.json"), "simulated record failure")
+
+
+def test_state_write_error_propagates_from_legacy_record_issue() -> None:
+    """A raising legacy record_issue propagates out of the run."""
+    orch, _fakes = _build(
+        api=_FakeApi(issues=[_issue(1)]),
+        state=_LegacyRecordIssueRaises(),
+    )
+
+    with pytest.raises(StateWriteError):
+        orch.run()
+
+
+class _LegacyRecordCommentRaises:
+    """Legacy state seam (no load/save) whose record_comment raises."""
+
+    def already_migrated(self, source_number: int) -> bool:
+        return False
+
+    def record_issue(self, source_number: int, github_number: int) -> None:
+        return None
+
+    def record_comment(
+        self, source_number: int, comment_index: int, github_comment_id: int
+    ) -> None:
+        raise StateWriteError(Path("state.json"), "simulated record failure")
+
+
+def test_state_write_error_propagates_from_legacy_record_comment() -> None:
+    """A raising legacy record_comment propagates out of the run."""
+    real_comment: dict[str, Any] = {
+        "type": "Comment",
+        "user": {"username": "alice"},
+        "created_at": "2024-01-02T10:30:00Z",
+        "body": "hello there",
+    }
+    api = _FakeApi(issues=[_issue(1)], comments_by_issue={1: [real_comment]})
+    orch, _fakes = _build(api=api, state=_LegacyRecordCommentRaises())
+
+    with pytest.raises(StateWriteError):
+        orch.run()
