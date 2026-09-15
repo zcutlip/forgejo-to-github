@@ -28,9 +28,10 @@ Implementation surfaced a second defect on this same path: the new nested
 default means the state file's parent directory usually does not exist yet,
 and nothing in the write path created it. Combined with the orchestrator's
 best-effort handling of persistence errors, every checkpoint write failed
-silently — the tool reported success while recording nothing. The
-preflight and writer-backstop requirements below close that gap; the
-best-effort handling itself is tracked separately.
+silently — the tool reported success while recording nothing. This plan
+closes the first gap by establishing the state path before any mutating
+operation. What a *later* loss of that path should do — and the best-effort
+handling itself — is deliberately left to a separate issue.
 
 ## What is already safe
 
@@ -38,8 +39,7 @@ best-effort handling itself is tracked separately.
   has no default of its own. The CLI resolves the path and passes it in.
   The constructor and the `save`/`load` signatures are unchanged, so the
   existing `tests/test_state_store.py` contract tests stay valid. This
-  plan adds one method to the class (`prepare`, Decisions H) and one guard
-  inside the existing atomic-write helper (Decisions I).
+  plan adds one method to the class (`prepare`, Decisions H).
 - `source`/`target` are already validated and split safely into
   `OWNER`/`REPO` (`f2gh.py`, the `_build_orchestrator` shape check). The
   new path helper can assume well-formed `owner/repo` inputs.
@@ -78,10 +78,6 @@ best-effort handling itself is tracked separately.
   discovery, checkpoint load) and destination writes (repository create,
   git push, issue create). Dry-run returns before that point and still
   touches nothing.
-- **The atomic-write helper creates its parent directory as a backstop.**
-  `_atomic_write_json` ensures `path.parent` exists before opening its
-  `.tmp` sibling, so a state directory removed mid-run is recreated rather
-  than turning a `save` into a failure.
 - **README reflects the new location.** The resumability bullet currently
   names a bare `state.json` and tells the user to delete it after deleting
   the GitHub repository. It must state the resolved default location, note
@@ -122,10 +118,11 @@ best-effort handling itself is tracked separately.
   (which owns the path), the ordering lives in the orchestrator (which
   owns the phases). It is deliberately **not** implemented as a preflight
   `save()` — several tests pin `save()` call counts.
-- **I. Writer backstop.** `_atomic_write_json` creates `path.parent` before
-  opening its temp file. The preflight is about *timing* — fail before the
-  destination is touched; this is about *correctness* — a `save` must
-  succeed even if the directory disappeared after the preflight ran.
+  The preflight is also the *baseline* the run relies on: once it has
+  confirmed the path exists and is writable, any later loss of that path is
+  a change from a known-good state rather than an ambiguous absence. This
+  plan stops at establishing that baseline; what a later loss should do is
+  the separate issue's contract.
 
 ## Out of scope
 
@@ -135,12 +132,12 @@ best-effort handling itself is tracked separately.
 - The clone-cache feature itself (#5) — this plan only establishes the
   shared path helper it will consume.
 - `CodebergClient` pagination (#9) and arbitrary Forgejo instances (#13).
-- **Making a persistence failure abort the run.** Whether a `save` failure
-  should stop the migration rather than being swallowed changes the
-  orchestrator's contract for *every* migration and is tracked as its own
-  issue. This plan only ensures the failure cannot arise from a missing
-  directory, and that the destination is not touched when the preflight
-  cannot write.
+- **Making a persistence failure abort the run.** This plan establishes the
+  state path up front but deliberately does not decide what a *later* loss
+  of it should do. That belongs to the issue that makes persistence
+  failures abort — including the rule that a path confirmed good and then
+  lost is fatal — and changes the orchestrator's contract for every
+  migration.
 
 ## Test contract (RED stage)
 
@@ -157,19 +154,12 @@ Written before implementation:
    the CLI does not namespace or rewrite it.
 5. `tests/test_cli.py` — the interrupt banner prints the resolved path,
    not `./state.json` (amends the existing banner assertion).
-6. `tests/test_state_store.py` — `save` into a path whose parent does not
-   exist creates the parent and round-trips through `load`.
-7. `tests/test_state_store.py` — `prepare()` creates missing parent
+6. `tests/test_state_store.py` — `prepare()` creates missing parent
    directories and succeeds; it raises `StateWriteError` when the
    directory cannot be created or written.
-8. `tests/test_orchestration.py` — `run()` calls `prepare()` before the
+7. `tests/test_orchestration.py` — `run()` calls `prepare()` before the
    first mutating phase: when `prepare()` raises, no repository-create
    call is made.
-9. `tests/test_orchestration.py` — a state directory removed partway
-   through a run (after the preflight, before the next checkpoint) is
-   recreated by the writer backstop and the run completes. This is the
-   end-to-end proof that Decisions H and I hold through a real run, not
-   merely through a direct `save()` call.
 
 ## References
 
