@@ -50,7 +50,7 @@ from forgejo_to_github.git import GitMirror
 from forgejo_to_github.github import GitHubClient
 from forgejo_to_github.migration import MigrationOrchestrator
 from forgejo_to_github.reporting import Reporter
-from forgejo_to_github.state import StateStore
+from forgejo_to_github.state import StateStore, StateWriteError
 
 # --- helpers ---------------------------------------------------------------
 
@@ -2346,3 +2346,67 @@ def test_orchestrator_increments_issues_skipped_on_resume() -> None:
         "the non-resumed issue was created successfully; "
         f"got issues_succeeded={result.issues_succeeded!r}"
     )
+
+
+# ===========================================================================
+# State preflight before target preparation (append-only)
+# ===========================================================================
+#
+# Contract: ``run()`` performs a state-store preflight after loading the
+# checkpoint and before the first mutating phase
+# (``_prepare_target``). ``StateStore.prepare()`` creates the state
+# directory and proves it writable, raising ``StateWriteError`` on
+# failure. When that preflight fails, the run must abort before any
+# repository-create call is made.
+
+
+class _PreflightFailsState:
+    """Concrete-shaped state seam whose preflight write check fails."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def load(self) -> dict[str, Any]:
+        return {}
+
+    def save(self, repo_created: Any, git_pushed: Any, migrated: Any) -> None:
+        return None
+
+    def prepare(self) -> None:
+        raise self._error
+
+
+class _TargetApi:
+    """API seam that records target-repository interaction."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def check_repository_exists(self) -> None:
+        self.calls.append("check_repository_exists")
+
+    def create_repository(self, name: str, description: str, public: bool) -> None:
+        self.calls.append("create_repository")
+
+    def list_issues(self) -> list[Any]:
+        return []
+
+
+def test_run_preflight_failure_aborts_before_repository_create():
+    """A state preflight failure stops the run before the target is created.
+
+    The harness is armed for the create path: ``check_repository_exists``
+    reports the target missing and ``repo.yes`` is set, so absent the
+    failure ``create_repository`` would be reached. That makes both
+    assertions meaningful rather than vacuous.
+    """
+    error = StateWriteError(Path("state.json"), "simulated write failure")
+    api: Any = _TargetApi()
+    orch, fakes = _build(api=api, state=_PreflightFailsState(error))
+    fakes["repo"].yes = True
+
+    with pytest.raises(StateWriteError):
+        orch.run()
+
+    assert "check_repository_exists" not in api.calls
+    assert "create_repository" not in api.calls
