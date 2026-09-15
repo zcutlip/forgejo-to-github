@@ -16,11 +16,18 @@ from forgejo_to_github.github import GitHubClient
 from forgejo_to_github.migration import MigrationOrchestrator
 from forgejo_to_github.paths import default_state_base, state_path_for
 from forgejo_to_github.reporting import Reporter
-from forgejo_to_github.state import StateStore
+from forgejo_to_github.state import (
+    StateLockedError,
+    StateStore,
+    StateWriteError,
+)
 from forgejo_to_github.transport import RequestsTransport
 
 # SIGINT convention: 128 + signal number (SIGINT = 2).
 EXIT_INTERRUPTED = 130
+
+# State-path refusal (preflight could not establish the state file).
+EXIT_STATE_ERROR = 3
 
 
 def parse_args() -> argparse.Namespace:
@@ -252,6 +259,25 @@ def main() -> None:
                 file=sys.stderr,
             )
         sys.exit(EXIT_INTERRUPTED)
+    except StateLockedError as exc:
+        print(
+            "Another f2gh run is already migrating this pair.",
+            file=sys.stderr,
+        )
+        print(f"  State path: {exc.state_path}", file=sys.stderr)
+        print(
+            "  Wait for it to finish, or remove the lock file once it has stopped.",
+            file=sys.stderr,
+        )
+        sys.exit(EXIT_STATE_ERROR)
+    except StateWriteError as exc:
+        print(
+            "Could not use the migration state path; nothing was migrated.",
+            file=sys.stderr,
+        )
+        print(f"  State path: {exc.path}", file=sys.stderr)
+        print(f"  Reason: {exc.reason}", file=sys.stderr)
+        sys.exit(EXIT_STATE_ERROR)
 
 
 if __name__ == "__main__":
