@@ -68,23 +68,39 @@ handling itself — is deliberately left to a separate issue.
 - **Resolution happens after source/target validation.** The path currently
   is set before `source`/`target` are parsed; the new order must be
   validate → resolve → construct.
-- **The state directory is created and proven writable before any mutating
-  operation.** `StateStore.prepare()` creates the state file's parent
-  directories if absent, then verifies writability with a
-  create-and-remove probe file in that directory, raising
-  `StateWriteError` on failure. `MigrationOrchestrator.run()` calls it
-  (concrete store only) after the checkpoint load and **before**
-  `_prepare_target` — the boundary between read-only work (dry-run
-  discovery, checkpoint load) and destination writes (repository create,
-  git push, issue create). Dry-run returns before that point and still
-  touches nothing.
+- **The state path is created, verified, and exclusively claimed before any
+  mutating operation.** `StateStore.prepare()` creates the state file's
+  parent directories if absent, writes a probe file and reads it back to
+  confirm the bytes actually round-trip (not merely that a file could be
+  created), and acquires the run lock, raising `StateWriteError` on any
+  failure. `MigrationOrchestrator.run()` calls it (concrete store only)
+  after the checkpoint load and **before** `_prepare_target` — the boundary
+  between read-only work (dry-run discovery, checkpoint load) and
+  destination writes (repository create, git push, issue create). Dry-run
+  returns before that point and still touches nothing.
+- **The state path is exclusively ours for the duration of the run.** A
+  lock file named `<state>.lock` sits beside the state file, so two runs of
+  the *same* migration contend while runs of different migrations never do.
+  Contention is a refusal to start, not a warning — two runs sharing one
+  checkpoint is exactly the duplicate-issue outcome this tool exists to
+  avoid. The lock is taken in the preflight and released by the OS when the
+  process ends, so there is no stale-lock path and no cleanup logic to get
+  wrong.
+- **The checkpoint rename is durable, not merely atomic.**
+  `_atomic_write_json` already fsyncs its temp file before `os.replace`; it
+  must also fsync the parent directory afterwards so the rename itself
+  survives a power loss. The directory fsync is POSIX-only — Windows
+  exposes no equivalent through `os` — and is skipped there.
 - **README reflects the new location.** The resumability bullet currently
   names a bare `state.json` and tells the user to delete it after deleting
   the GitHub repository. It must state the resolved default location, note
   `--state-file` as an override, and keep the "delete state to reset"
   guidance pointing at a real path.
-- **New dependency:** `platformdirs` (single-purpose, no transitive
-  dependencies), added to the current minimal dependency set (`requests`).
+- **New dependencies:** `platformdirs` (path resolution) and `filelock`
+  (the run lock). Both are single-purpose with no transitive dependencies.
+  `filelock` dispatches to `fcntl.flock` on POSIX and `msvcrt.locking` on
+  Windows — the platform branch we cannot test ourselves, and therefore
+  better delegated to a library whose users exercise it.
 
 ## Decisions
 
@@ -109,7 +125,7 @@ handling itself — is deliberately left to a separate issue.
 - **F. Banner.** The interrupt handler prints the actual resolved path.
 - **G. Legacy file.** Ignored outright.
 - **H. Preflight.** A `StateStore.prepare()` method (create directories,
-  then prove writability with a temp-file probe) invoked by
+  write a probe and read it back to confirm the bytes round-trip) invoked by
   `MigrationOrchestrator.run()` before `_prepare_target`. An
   existing-but-unwritable directory passes `mkdir` and still fails at the
   first real checkpoint, which lands *after* the destination repository
@@ -123,6 +139,17 @@ handling itself — is deliberately left to a separate issue.
   a change from a known-good state rather than an ambiguous absence. This
   plan stops at establishing that baseline; what a later loss should do is
   the separate issue's contract.
+- **J. Run lock.** A per-migration lock file at `<state>.lock`, acquired by
+  `prepare()` via `filelock.FileLock(..., timeout=0)` and released when the
+  process exits. `timeout=0` gives exactly one acquisition attempt, which is
+  the "refuse to start" semantics required; on contention the CLI reports
+  the state path and exits non-zero. Locking beside the state file rather
+  than globally keeps unrelated migrations independent. `fallback_to_soft`
+  is disabled so a filesystem that cannot provide real locks fails loudly
+  instead of silently degrading to existence-based locking.
+- **K. Durable rename.** After `os.replace`, fsync the parent directory so
+  the rename is durable and not only atomic. Guarded for platforms that
+  cannot fsync a directory; the POSIX path is the one the suite covers.
 
 ## Out of scope
 
@@ -132,6 +159,11 @@ handling itself — is deliberately left to a separate issue.
 - The clone-cache feature itself (#5) — this plan only establishes the
   shared path helper it will consume.
 - `CodebergClient` pagination (#9) and arbitrary Forgejo instances (#13).
+- **Windows test-suite readiness.** The tool is written portably and should
+  run on Windows, but the suite is validated on POSIX only and cannot be
+  validated there. The `chmod`-based unwritable-directory test is the known
+  POSIX-dependent case; it is left as-is rather than guarded, since running
+  the suite on Windows is not planned.
 - **Making a persistence failure abort the run.** This plan establishes the
   state path up front but deliberately does not decide what a *later* loss
   of it should do. That belongs to the issue that makes persistence
@@ -160,6 +192,20 @@ Written before implementation:
 7. `tests/test_orchestration.py` — `run()` calls `prepare()` before the
    first mutating phase: when `prepare()` raises, no repository-create
    call is made.
+8. `tests/test_state_store.py` — `save` into a path whose parent does not
+   exist raises `StateWriteError` rather than creating it. A **disclosed
+   guard**: it passes today and cannot fail until someone adds directory
+   creation to the writer. It exists so a silent `mkdir` cannot be
+   reintroduced unnoticed.
+9. `tests/test_state_store.py` — the probe verifies content, not just
+   creatability: `prepare()` raises `StateWriteError` when a written probe
+   does not read back as written.
+10. `tests/test_state_store.py` — the run lock: a second `prepare()` on the
+    same path is refused while the first holds it; releasing the first lets
+    the second through; two different state paths never contend.
+11. `tests/test_state_store.py` — `save` fsyncs the parent directory after
+    `os.replace` (mechanism assertion, in the style of the existing
+    `os.replace` spy).
 
 ## References
 
@@ -169,3 +215,6 @@ Written before implementation:
 - GitHub issue #11 — state `version` key (adjacent schema work, not here)
 - `.cache`/`.state` convention note: no legacy migration is required, so no
   compatibility test is added
+- `filelock` — run lock; dispatches to `fcntl.flock` (POSIX) /
+  `msvcrt.locking` (Windows). Chosen over hand-rolling precisely because the
+  Windows branch is untestable here.
