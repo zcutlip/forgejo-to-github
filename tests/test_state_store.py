@@ -20,6 +20,9 @@ Contract points under test:
 from __future__ import annotations
 
 import json
+import os
+import stat
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -216,18 +219,25 @@ def test_save_signature_locked():
         assert name in params, f"save() must accept {name!r}"
 
 
-# --- contract 5: save() creates missing parent directories -------------------
+# --- contract 5: save() does not create parent directories -------------------
 
 
-def test_save_creates_missing_parent_directories(tmp_path):
+def test_save_raises_when_parent_directory_is_missing(tmp_path):
+    """``save`` requires its parent directory to already exist.
+
+    A disclosed guard rail: this passes today and cannot fail unless the
+    writer starts creating directories — which would silently mask a state
+    path that disappeared underneath a run. The state path is established by
+    ``prepare()`` before anything is mutated.
+    """
     state_path = tmp_path / "nested" / "deeper" / "state.json"
     assert not state_path.parent.exists()
     store = StateStore(state_path, "owner/source", "owner/target")
 
-    store.save(repo_created=True, git_pushed=False, migrated={1: 1})
+    with pytest.raises(StateWriteError):
+        store.save(repo_created=True, git_pushed=False, migrated={1: 1})
 
-    assert state_path.exists()
-    assert store.load()["migrated"] == {1: 1}
+    assert not state_path.parent.exists()
 
 
 # --- contract 6: prepare() creates + proves the parent directory --------------
@@ -264,3 +274,86 @@ def test_prepare_raises_state_write_error_when_directory_not_writable(tmp_path):
             store.prepare()
     finally:
         blocked.chmod(0o700)
+
+
+# --- contract 7: the probe verifies content, not just creatability -----------
+
+
+def test_prepare_raises_when_probe_write_does_not_persist(tmp_path):
+    """A write that appears to succeed but does not stick must be caught.
+
+    The probe is written and read back; here the write is neutered so the
+    read-back cannot match. This is why the probe reads back rather than
+    merely checking that a file could be created.
+    """
+    store = StateStore(tmp_path / "state.json", "owner/source", "owner/target")
+
+    with (
+        patch.object(Path, "write_text", lambda self, *a, **k: 0),
+        pytest.raises(StateWriteError),
+    ):
+        store.prepare()
+
+
+# --- contract 8: the run lock ------------------------------------------------
+
+
+def test_prepare_refuses_a_second_run_on_the_same_state_path(tmp_path):
+    state_path = tmp_path / "state.json"
+    first = StateStore(state_path, "owner/source", "owner/target")
+    second = StateStore(state_path, "owner/source", "owner/target")
+
+    first.prepare()
+    try:
+        with pytest.raises(StateWriteError):
+            second.prepare()
+    finally:
+        first.release()
+
+
+def test_release_lets_a_subsequent_run_proceed(tmp_path):
+    state_path = tmp_path / "state.json"
+    first = StateStore(state_path, "owner/source", "owner/target")
+    second = StateStore(state_path, "owner/source", "owner/target")
+
+    first.prepare()
+    first.release()
+
+    second.prepare()
+    second.release()
+
+
+def test_lock_does_not_contend_across_different_state_paths(tmp_path):
+    first = StateStore(tmp_path / "a" / "state.json", "owner/source", "owner/target")
+    second = StateStore(tmp_path / "b" / "state.json", "owner/source", "owner/target")
+
+    first.prepare()
+    try:
+        second.prepare()
+    finally:
+        second.release()
+        first.release()
+
+
+# --- contract 9: the rename is durable, not merely atomic --------------------
+
+
+def test_save_fsyncs_the_parent_directory_after_replace(tmp_path):
+    """Exactly one fsync targets a directory, and it comes after the file's.
+
+    The file fsync makes the content durable; the directory fsync makes the
+    rename itself durable, so a power loss cannot lose the checkpoint that
+    ``os.replace`` appeared to complete.
+    """
+    store = _store(tmp_path)
+    fsync_targets: list[bool] = []
+
+    def _record(fd: int) -> None:
+        fsync_targets.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+
+    with patch("os.fsync", side_effect=_record), patch("os.replace"):
+        store.save(repo_created=False, git_pushed=False, migrated={})
+
+    assert fsync_targets, "save() must fsync at least once"
+    assert fsync_targets[0] is False, "the temp file is fsynced before the rename"
+    assert fsync_targets.count(True) == 1, "exactly one directory fsync"
