@@ -27,7 +27,7 @@ from unittest.mock import patch
 
 import pytest
 
-from forgejo_to_github.state import StateStore, StateWriteError
+from forgejo_to_github.state import StateLockedError, StateStore, StateWriteError
 
 # --- helpers ----------------------------------------------------------------
 
@@ -305,7 +305,7 @@ def test_prepare_refuses_a_second_run_on_the_same_state_path(tmp_path):
 
     first.prepare()
     try:
-        with pytest.raises(StateWriteError):
+        with pytest.raises(StateLockedError):
             second.prepare()
     finally:
         first.release()
@@ -321,6 +321,21 @@ def test_release_lets_a_subsequent_run_proceed(tmp_path):
 
     second.prepare()
     second.release()
+
+
+def test_release_is_idempotent(tmp_path):
+    """``release`` tolerates being called twice, or without a prior acquire."""
+    state_path = tmp_path / "state.json"
+    store = StateStore(state_path, "owner/source", "owner/target")
+
+    store.release()
+    store.prepare()
+    store.release()
+    store.release()
+
+    resumed = StateStore(state_path, "owner/source", "owner/target")
+    resumed.prepare()
+    resumed.release()
 
 
 def test_lock_does_not_contend_across_different_state_paths(tmp_path):
