@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -391,12 +392,57 @@ def test_main_keyboard_interrupt_prints_resume_hint_and_exits_130(
 
     captured = capsys.readouterr()
     assert "Interrupted by user" in captured.err
-    assert "state saved to ./state.json" in captured.err
+    assert "state saved to" in captured.err
+    assert "./state.json" not in captured.err
+    assert "owner/source/owner/target/state.json" in captured.err
     assert (
         "resume with f2gh --source owner/source --target owner/target" in captured.err
     )
     assert "Traceback" not in captured.err
     assert "Traceback" not in captured.out
+
+
+def test_main_state_file_flag_is_honored_verbatim(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An explicit state file path is used as given, not namespaced or rewritten.
+
+    The interrupt notice reports the resolved state path, so an operator who
+    supplied their own path sees exactly that path.
+    """
+    custom_state = tmp_path / "custom-state.json"
+    args = argparse.Namespace(
+        source="owner/source",
+        target="owner/target",
+        dry_run=False,
+        yes=True,
+        skip_git=True,
+        public=False,
+        description=None,
+        state_file=str(custom_state),
+    )
+    fake_orchestrator = Mock()
+    fake_orchestrator.run.side_effect = KeyboardInterrupt
+
+    with (
+        patch.object(f2gh, "parse_args", return_value=args),
+        patch.object(f2gh, "_build_orchestrator", return_value=fake_orchestrator),
+        patch.object(f2gh.sys, "exit") as mock_exit,
+    ):
+        try:
+            f2gh.main()
+        except KeyboardInterrupt:
+            pytest.fail(
+                "main() let KeyboardInterrupt escape instead of handling it "
+                "and exiting 130"
+            )
+
+    mock_exit.assert_called_once_with(130)
+
+    captured = capsys.readouterr()
+    assert str(custom_state) in captured.err
+    assert "owner/source/owner/target/state.json" not in captured.err
 
 
 def test_main_keyboard_interrupt_dry_run_does_not_claim_state_saved(
