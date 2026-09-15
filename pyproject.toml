@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Migrate repos from Codeberg/Forgejo to GitHub: issues, comments, labels, git mirror"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["requests", "platformdirs"]
+dependencies = ["requests", "platformdirs", "filelock"]
 
 [project.optional-dependencies]
 dev = [
