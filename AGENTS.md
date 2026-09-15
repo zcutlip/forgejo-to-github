@@ -35,7 +35,8 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
   - Keep the script modular and lightweight.
   - State persistence must rely on simple, human-readable file storage (`state.json`) using atomic writes (`os.replace`) to avoid file corruption during abrupt exits.
   - Maintain comment preservation and avoid stripping structural docstrings or inline operational comments when refactoring code.
-- **Dependencies**: Keep external dependencies minimal (prefer standard library or light additions like `requests`).
+  - **No cwd-relative paths for new files or directories.** New on-disk locations (state, cache, temp) must be cwd-independent: use `platformdirs` (user state/cache dirs) or an explicit CLI flag. Writing to the process cwd silently couples a run to the directory it was launched from — a known design mistake (`state.json`-in-cwd) that must not be repeated.
+- **Dependencies**: Keep external dependencies minimal (prefer standard library or light additions like `requests`). A single-purpose dependency with no transitive dependencies may be added with explicit user approval (e.g. `platformdirs`); otherwise prefer the standard library.
 
 ### C. Testing & Verification Rules
 - This project uses a centralized virtualenv at `~/.virtualenvs/forgejo-to-github`. Do **not** create or activate a project-local `.venv`, and do **not** invoke `pytest` directly.
@@ -66,6 +67,15 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
   tests will lock. Tests committed independently of implementation
   detect inadvertent test/contract drift during implementation. Never
   change tests to make an implementation pass.
+- **"Locked" is scoped to the effort:** a locked test/contract is a
+  guardrail that stops the agent drifting *during* the current
+  test/fix/implement/refactor cycle; referring to it during that work is
+  expected. It does not transcend that effort — any prior decision can be
+  changed by opening a new issue, so never present a past decision as
+  immutable or as something to argue around. A **new issue gets its own
+  fresh RED/GREEN cycle**: there is no "RED reopen" for new work;
+  "reopen RED" applies only when amending an already-committed test within
+  an in-flight issue.
 - **RED honesty:** A new test must fail for the contract reason. If it passes immediately, keep it only as a disclosed guard stating why it can't fail yet — never silently keep a vacuous pass.
 - **Stop gates:** User-held review checkpoints. After each substantive stage, stop for user review/approval. Final review is performed by the user.
 - **No autonomous commits:** Agents may commit only when the user explicitly prompts it in the current conversation. Never commit, push, or stage-then-commit unprompted — automated checks and delegate reports do not constitute user approval. Never prompt or remind the user that a commit could or should happen; commit opportunities are the user's to notice.
@@ -77,7 +87,11 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
 - Keep active implementation plans in `plans/`, numbered in dependency order.
 - Identify each active plan's primary GitHub issue near the top of the plan; keep related issues under `References`.
 - Move completed plans to `plans/archive/` rather than deleting them.
-- Before closing a plan's issue, comment with the completing commit(s) and verification status.
+- Comment on a plan's issue when it adds value for an outside reader —
+  e.g. the resulting state of the work, or the completing commit(s) and
+  verification status when the issue is closed manually. When a merge
+  commit will auto-close the issue, do **not** post a completion comment;
+  post state only, or nothing.
 - **External voice for GitHub issues:** Write issues in problem/solution/verification terms for an outside reader. Never cite slice letters, RED/GREEN phases, stop gates, spec files, ledger sections, or memory IDs — those are internal workflow artifacts.
 - **Spec prose and locked tests move together:** When amending a locked test's contract (e.g., raising a threshold), amend the spec prose documenting the rule in the same change. A test-only amendment leaves the spec contradicting the test.
 - Treat `plans/archive/02-package-refactor-and-test-foundation/` (the staged
@@ -125,3 +139,17 @@ f2gh --source owner/repo --target owner/repo --dry-run
 # Run linter
 ruff check .
 ```
+
+### Releases
+
+Fully manual — there is no PyPI publish step; `README.md` installs via
+`pipx` from the git URL.
+
+1. Bump `__version__` in `forgejo_to_github/__about__.py`. This is the
+   **single source of truth**: `pyproject.toml` reads it dynamically
+   (`[tool.setuptools.dynamic]`), so never bump the version there.
+2. Commit, tag `vX.Y.Z`, push.
+3. Create the GitHub release.
+
+User-visible behavior changes are a minor bump; test-only or doc-only
+changes are not released on their own.
