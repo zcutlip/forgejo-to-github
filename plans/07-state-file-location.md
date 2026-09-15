@@ -90,6 +90,12 @@ handling itself — is deliberately left to a separate issue.
   `StateStore.release()`, which `run()` calls in a `finally`; the OS
   additionally drops it when the process ends, so a crash needs no
   stale-lock recovery and there is no cleanup path to get wrong.
+- **A refused preflight stops the run with a clear reason.** When
+  `prepare()` cannot establish the state path, the CLI reports the resolved
+  path and exits `EXIT_STATE_ERROR` (`3`), never starting the migration.
+  Contention and an unusable path are reported distinctly, because "another
+  run is already migrating this pair" and "this path cannot be written" call
+  for different responses from the operator.
 - **The checkpoint rename is durable, not merely atomic.**
   `_atomic_write_json` already fsyncs its temp file before `os.replace`; it
   must also fsync the parent directory afterwards so the rename itself
@@ -160,7 +166,11 @@ handling itself — is deliberately left to a separate issue.
   state file rather than globally keeps unrelated migrations independent.
   `fallback_to_soft` is disabled so a filesystem that cannot provide real
   locks fails loudly instead of silently degrading to existence-based
-  locking.
+  locking. The refusal reaches the operator as `EXIT_STATE_ERROR` (`3`),
+  sitting alongside the reserved `0`/`1`/`2` migration outcomes and `130`
+  for an interrupt. The fail-fast work reuses this code rather than
+  defining its own — both conditions mean the same thing operationally,
+  that the state path refused.
 - **K. Durable rename.** After `os.replace`, fsync the parent directory so
   the rename is durable and not only atomic. Guarded for platforms that
   cannot fsync a directory; the POSIX path is the one the suite covers.
@@ -222,6 +232,10 @@ Written before implementation:
 11. `tests/test_state_store.py` — `save` fsyncs the parent directory after
     `os.replace` (mechanism assertion, in the style of the existing
     `os.replace` spy).
+12. `tests/test_cli.py` — a refused preflight exits `EXIT_STATE_ERROR` (`3`)
+    without starting the migration, and the message names the resolved
+    state path. Lock contention and an unusable path produce
+    distinguishable output.
 
 ## References
 
