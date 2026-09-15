@@ -186,6 +186,11 @@ class MigrationOrchestrator:
         ``SystemExit``. On clone failure, the underlying exception
         propagates; on push or per-issue failure, the failure is
         accumulated into the result and the run continues.
+
+        A state-preflight failure (create/verify/lock) also propagates —
+        it is never swallowed. When the injected state seam exposes a
+        callable ``release``, the state lock is released in a ``finally``
+        so it cannot outlive the migration.
         """
         # Phase 1: dry-run read-only discovery. GET requests only — no
         # mutating HTTP, no git subprocess, no state write, and no
@@ -201,21 +206,33 @@ class MigrationOrchestrator:
         # resume checks, without broadening the legacy already_migrated path.
         self._ensure_concrete_state_loaded()
 
-        # Pre-flight target-repository phase (normal-run path only;
-        # dry-run returns above via _discover_dry_run). Aborts the run
-        # before any git or issue work when the prompt is denied.
-        if not self._prepare_target(result):
+        # Preflight: establish the state path (create, verify, lock) before
+        # any destination write. Detected by a callable ``prepare`` so a
+        # seam exposing only load()/save() keeps the legacy path.
+        prepare_fn = getattr(self.state, "prepare", None)
+        if callable(prepare_fn):
+            prepare_fn()
+
+        try:
+            # Pre-flight target-repository phase (normal-run path only;
+            # dry-run returns above via _discover_dry_run). Aborts the run
+            # before any git or issue work when the prompt is denied.
+            if not self._prepare_target(result):
+                return result
+
+            # Phase 4: Git mirror. Skipped entirely when --skip-git is set.
+            if not bool(getattr(self.repo, "skip_git", False)):
+                self.prepare_repository(result)
+
+            # Phase 5: Issue migration. Always attempted after the Git
+            # phase (or skipped-Git), regardless of push outcome.
+            self._migrate_issues(result)
+
             return result
-
-        # Phase 4: Git mirror. Skipped entirely when --skip-git is set.
-        if not bool(getattr(self.repo, "skip_git", False)):
-            self.prepare_repository(result)
-
-        # Phase 5: Issue migration. Always attempted after the Git
-        # phase (or skipped-Git), regardless of push outcome.
-        self._migrate_issues(result)
-
-        return result
+        finally:
+            release_fn = getattr(self.state, "release", None)
+            if callable(release_fn):
+                release_fn()
 
     # --- dry-run read-only discovery -----------------------------------------
 
