@@ -244,6 +244,35 @@ Written before implementation:
     state path. Lock contention and an unusable path produce
     distinguishable output.
 
+## Added scope — `repo_created` never recorded
+
+Defect found during a live test run on this branch (tracked here, not as a
+separate issue): `MigrationOrchestrator._prepare_target` calls
+`create_repository(...)` and returns without setting
+`_concrete_repo_created`, so the checkpoint field can only ever be `false`.
+The pre-refactor monolith set it (`7419e43:f2gh.py:352,356`) and saved it
+immediately; the refactor kept the field and dropped the assignment.
+
+- **Fix (Option A).** One line inside the existing `if callable(create):`
+  guard in `_prepare_target`, after the `create(...)` call:
+  `self._concrete_repo_created = True`. The flag then persists at the next
+  checkpoint that already exists (`_mark_git_pushed()` or the first issue's
+  `_safe_record_issue`). No save is added at creation time, so no new
+  failure mode is introduced, and the question of what a failed save means
+  is left to the fail-fast work, which decides it once and globally.
+- **Test.** `_CreatingApi(_FakeApi)` — `check_repository_exists()` returns
+  `None`, `create_repository(...)` records the call — driven with
+  `_PersistingSpyStateStore` (subclasses the real `StateStore`, so it is
+  concrete *and* records `save_calls`) and `fakes["repo"].yes = True`.
+  Asserts the creation happened, `save_calls[-1][0] is True`, and
+  `load()["repo_created"] is True`. Verified: no existing test executes the
+  creation path or asserts the flag, so the fix changes behavior nowhere
+  the suite currently observes.
+- **Accepted edges.** `--skip-git` with zero issues fires no save, so the
+  flag never persists (degenerate, accepted). A resume from a buggy-era
+  file keeps `false` for a run that created nothing (correct, and harmless
+  — nothing reads the field).
+
 ## References
 
 - GitHub issue #14
