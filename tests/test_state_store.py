@@ -22,7 +22,9 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from forgejo_to_github.state import StateStore
+import pytest
+
+from forgejo_to_github.state import StateStore, StateWriteError
 
 # --- helpers ----------------------------------------------------------------
 
@@ -212,3 +214,53 @@ def test_save_signature_locked():
     assert params[:1] == ["self"]
     for name in ("repo_created", "git_pushed", "migrated"):
         assert name in params, f"save() must accept {name!r}"
+
+
+# --- contract 5: save() creates missing parent directories -------------------
+
+
+def test_save_creates_missing_parent_directories(tmp_path):
+    state_path = tmp_path / "nested" / "deeper" / "state.json"
+    assert not state_path.parent.exists()
+    store = StateStore(state_path, "owner/source", "owner/target")
+
+    store.save(repo_created=True, git_pushed=False, migrated={1: 1})
+
+    assert state_path.exists()
+    assert store.load()["migrated"] == {1: 1}
+
+
+# --- contract 6: prepare() creates + proves the parent directory --------------
+
+
+def test_prepare_creates_missing_parent_directories(tmp_path):
+    state_path = tmp_path / "nested" / "state.json"
+    store = StateStore(state_path, "owner/source", "owner/target")
+
+    store.prepare()
+
+    assert state_path.parent.is_dir()
+
+
+def test_prepare_raises_state_write_error_when_directory_cannot_be_created(
+    tmp_path,
+):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory")
+    store = StateStore(blocker / "state.json", "owner/source", "owner/target")
+
+    with pytest.raises(StateWriteError):
+        store.prepare()
+
+
+def test_prepare_raises_state_write_error_when_directory_not_writable(tmp_path):
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    blocked.chmod(0o500)
+    store = StateStore(blocked / "state.json", "owner/source", "owner/target")
+
+    try:
+        with pytest.raises(StateWriteError):
+            store.prepare()
+    finally:
+        blocked.chmod(0o700)
