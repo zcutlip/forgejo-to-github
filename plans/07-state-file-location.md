@@ -89,7 +89,12 @@ handling itself — is deliberately left to a separate issue.
   avoid. The lock is taken by `prepare()` and dropped by
   `StateStore.release()`, which `run()` calls in a `finally`; the OS
   additionally drops it when the process ends, so a crash needs no
-  stale-lock recovery and there is no cleanup path to get wrong.
+  stale-lock recovery and there is no cleanup path to get wrong. Release
+  drops the lock and **leaves the lock file on disk** — removing it would
+  reintroduce the classic unlink race, where a waiter that already opened
+  the file and a newcomer that re-creates it hold locks on different inodes
+  and both believe they have it. The file's presence carries no meaning
+  once its lock is gone.
 - **A refused preflight stops the run with a clear reason.** When
   `prepare()` cannot establish the state path, the CLI reports the resolved
   path and exits `EXIT_STATE_ERROR` (`3`), never starting the migration.
@@ -160,10 +165,12 @@ handling itself — is deliberately left to a separate issue.
   different condition from "this path is unusable" and the CLI should be
   able to say which. Release is **explicit**: `StateStore.release()` drops
   the lock and is idempotent, and `run()` calls it in a `finally` so the
-  lock cannot outlive the migration. Process exit remains the crash
-  backstop — the OS drops the lock however the process ends, which is why
-  this style of locking needs no stale-lock recovery. Locking beside the
-  state file rather than globally keeps unrelated migrations independent.
+  lock cannot outlive the migration, and leaves the lock file on disk
+  rather than unlinking it (see the lock contract bullet for why). Process
+  exit remains the crash backstop — the OS drops the lock however the
+  process ends, which is why this style of locking needs no stale-lock
+  recovery. Locking beside the state file rather than globally keeps
+  unrelated migrations independent.
   `fallback_to_soft` is disabled so a filesystem that cannot provide real
   locks fails loudly instead of silently degrading to existence-based
   locking. The refusal reaches the operator as `EXIT_STATE_ERROR` (`3`),
