@@ -519,9 +519,9 @@ class MigrationOrchestrator:
         Sets the orchestrator-owned ``git_pushed`` flag and persists it
         through the existing ``StateStore.save(repo_created, git_pushed,
         migrated)`` channel, preserving the currently known
-        ``repo_created`` and ``migrated`` values. Best-effort:
-        persistence errors are swallowed, mirroring
-        :meth:`_safe_record_issue`. This runs at the end of the Git
+        ``repo_created`` and ``migrated`` values. Persistence failures
+        propagate out of :meth:`run` rather than being swallowed. This
+        runs at the end of the Git
         phase, so the checkpoint lands before issue migration begins.
         On push failure this is never called: ``git_pushed`` stays
         falsy and a later resume retries the Git phase. Legacy seams
@@ -534,14 +534,11 @@ class MigrationOrchestrator:
         save_fn = getattr(self.state, "save", None)
         if not callable(save_fn):
             return
-        try:
-            save_fn(
-                self._concrete_repo_created,
-                self._concrete_git_pushed,
-                dict(self._concrete_migrated),
-            )
-        except Exception:  # noqa: BLE001 — state seam is best-effort
-            return
+        save_fn(
+            self._concrete_repo_created,
+            self._concrete_git_pushed,
+            dict(self._concrete_migrated),
+        )
 
     def _migrate_issues(self, result: MigrationResult) -> None:
         """Enumerate source issues and migrate each one.
@@ -823,7 +820,11 @@ class MigrationOrchestrator:
             return False
 
     def _safe_record_issue(self, source_number: int, github_number: int) -> None:
-        """Forward ``record_issue`` to the state seam, swallowing errors."""
+        """Forward ``record_issue`` to the state seam.
+
+        Persistence failures propagate out of :meth:`run` rather than
+        being swallowed.
+        """
         # Concrete StateStore path: record in orchestrator-owned in-memory
         # state and persist via StateStore.save(repo_created, git_pushed,
         # migrated), preserving repo_created/git_pushed as currently known.
@@ -833,35 +834,30 @@ class MigrationOrchestrator:
             save_fn = getattr(self.state, "save", None)
             if not callable(save_fn):
                 return
-            try:
-                save_fn(
-                    self._concrete_repo_created,
-                    self._concrete_git_pushed,
-                    dict(self._concrete_migrated),
-                )
-            except Exception:  # noqa: BLE001 — state seam is best-effort
-                return
+            save_fn(
+                self._concrete_repo_created,
+                self._concrete_git_pushed,
+                dict(self._concrete_migrated),
+            )
             return
         record = getattr(self.state, "record_issue", None)
         if not callable(record):
             return
-        try:
-            record(source_number, github_number)
-        except Exception:  # noqa: BLE001 — state seam is best-effort
-            return
+        record(source_number, github_number)
 
     def _safe_record_comment(
         self, source_number: int, comment_index: int, response: Any
     ) -> None:
-        """Forward ``record_comment`` to the state seam, swallowing errors."""
+        """Forward ``record_comment`` to the state seam.
+
+        Persistence failures propagate out of :meth:`run` rather than
+        being swallowed.
+        """
         record = getattr(self.state, "record_comment", None)
         if not callable(record):
             return
-        try:
-            github_comment_id = self._extract_comment_id(response)
-            record(source_number, comment_index, github_comment_id)
-        except Exception:  # noqa: BLE001 — state seam is best-effort
-            return
+        github_comment_id = self._extract_comment_id(response)
+        record(source_number, comment_index, github_comment_id)
 
     @staticmethod
     def _extract_comment_id(response: Any) -> int:

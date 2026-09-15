@@ -272,11 +272,16 @@ def main() -> None:
         sys.exit(EXIT_STATE_ERROR)
     except StateWriteError as exc:
         print(
-            "Could not use the migration state path; nothing was migrated.",
+            "Could not write the migration state; stopping.",
             file=sys.stderr,
         )
         print(f"  State path: {exc.path}", file=sys.stderr)
         print(f"  Reason: {exc.reason}", file=sys.stderr)
+        print(
+            "  The most recent work may not be recorded — check the target "
+            "repository before re-running.",
+            file=sys.stderr,
+        )
         sys.exit(EXIT_STATE_ERROR)
 
 
