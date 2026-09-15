@@ -72,20 +72,24 @@ handling itself — is deliberately left to a separate issue.
   mutating operation.** `StateStore.prepare()` creates the state file's
   parent directories if absent, writes a probe file and reads it back to
   confirm the bytes actually round-trip (not merely that a file could be
-  created), and acquires the run lock, raising `StateWriteError` on any
-  failure. `MigrationOrchestrator.run()` calls it (concrete store only)
-  after the checkpoint load and **before** `_prepare_target` — the boundary
-  between read-only work (dry-run discovery, checkpoint load) and
-  destination writes (repository create, git push, issue create). Dry-run
-  returns before that point and still touches nothing.
+  created), and acquires the run lock. Failures are typed: `StateWriteError`
+  when the path cannot be created or verified, `StateLockedError` when
+  another run already holds the lock — so the CLI can distinguish "this path
+  is unusable" from "someone else is using it". `MigrationOrchestrator.run()`
+  calls it (concrete store only) after the checkpoint load and **before**
+  `_prepare_target` — the boundary between read-only work (dry-run
+  discovery, checkpoint load) and destination writes (repository create,
+  git push, issue create). Dry-run returns before that point and still
+  touches nothing.
 - **The state path is exclusively ours for the duration of the run.** A
   lock file named `<state>.lock` sits beside the state file, so two runs of
   the *same* migration contend while runs of different migrations never do.
   Contention is a refusal to start, not a warning — two runs sharing one
   checkpoint is exactly the duplicate-issue outcome this tool exists to
-  avoid. The lock is taken in the preflight and released by the OS when the
-  process ends, so there is no stale-lock path and no cleanup logic to get
-  wrong.
+  avoid. The lock is taken by `prepare()` and dropped by
+  `StateStore.release()`, which `run()` calls in a `finally`; the OS
+  additionally drops it when the process ends, so a crash needs no
+  stale-lock recovery and there is no cleanup path to get wrong.
 - **The checkpoint rename is durable, not merely atomic.**
   `_atomic_write_json` already fsyncs its temp file before `os.replace`; it
   must also fsync the parent directory afterwards so the rename itself
@@ -101,6 +105,9 @@ handling itself — is deliberately left to a separate issue.
   `filelock` dispatches to `fcntl.flock` on POSIX and `msvcrt.locking` on
   Windows — the platform branch we cannot test ourselves, and therefore
   better delegated to a library whose users exercise it.
+- **New exception:** `StateLockedError` in `state.py`, a sibling of
+  `StateWriteError` rather than a subclass — lock contention is not a write
+  failure, and the CLI needs to tell the two apart.
 
 ## Decisions
 
@@ -140,13 +147,20 @@ handling itself — is deliberately left to a separate issue.
   plan stops at establishing that baseline; what a later loss should do is
   the separate issue's contract.
 - **J. Run lock.** A per-migration lock file at `<state>.lock`, acquired by
-  `prepare()` via `filelock.FileLock(..., timeout=0)` and released when the
-  process exits. `timeout=0` gives exactly one acquisition attempt, which is
-  the "refuse to start" semantics required; on contention the CLI reports
-  the state path and exits non-zero. Locking beside the state file rather
-  than globally keeps unrelated migrations independent. `fallback_to_soft`
-  is disabled so a filesystem that cannot provide real locks fails loudly
-  instead of silently degrading to existence-based locking.
+  `prepare()` via `filelock.FileLock(..., timeout=0)`. `timeout=0` gives
+  exactly one acquisition attempt, which is the "refuse to start" semantics
+  required. Contention raises a **distinct** `StateLockedError` rather than
+  `StateWriteError`, because "someone else is using this path" is a
+  different condition from "this path is unusable" and the CLI should be
+  able to say which. Release is **explicit**: `StateStore.release()` drops
+  the lock and is idempotent, and `run()` calls it in a `finally` so the
+  lock cannot outlive the migration. Process exit remains the crash
+  backstop — the OS drops the lock however the process ends, which is why
+  this style of locking needs no stale-lock recovery. Locking beside the
+  state file rather than globally keeps unrelated migrations independent.
+  `fallback_to_soft` is disabled so a filesystem that cannot provide real
+  locks fails loudly instead of silently degrading to existence-based
+  locking.
 - **K. Durable rename.** After `os.replace`, fsync the parent directory so
   the rename is durable and not only atomic. Guarded for platforms that
   cannot fsync a directory; the POSIX path is the one the suite covers.
@@ -191,7 +205,8 @@ Written before implementation:
    directory cannot be created or written.
 7. `tests/test_orchestration.py` — `run()` calls `prepare()` before the
    first mutating phase: when `prepare()` raises, no repository-create
-   call is made.
+   call is made. Also that a completed run releases the lock — a fresh
+   store on the same path can `prepare()` immediately afterwards.
 8. `tests/test_state_store.py` — `save` into a path whose parent does not
    exist raises `StateWriteError` rather than creating it. A **disclosed
    guard**: it passes today and cannot fail until someone adds directory
@@ -201,8 +216,9 @@ Written before implementation:
    creatability: `prepare()` raises `StateWriteError` when a written probe
    does not read back as written.
 10. `tests/test_state_store.py` — the run lock: a second `prepare()` on the
-    same path is refused while the first holds it; releasing the first lets
-    the second through; two different state paths never contend.
+    same path raises `StateLockedError` while the first holds it; releasing
+    the first lets the second through; `release()` is idempotent; two
+    different state paths never contend.
 11. `tests/test_state_store.py` — `save` fsyncs the parent directory after
     `os.replace` (mechanism assertion, in the style of the existing
     `os.replace` spy).
