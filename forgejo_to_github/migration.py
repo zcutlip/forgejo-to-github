@@ -186,6 +186,11 @@ class MigrationOrchestrator:
         ``SystemExit``. On clone failure, the underlying exception
         propagates; on push or per-issue failure, the failure is
         accumulated into the result and the run continues.
+
+        A state-preflight failure (create/verify/lock) also propagates —
+        it is never swallowed. When the injected state seam exposes a
+        callable ``release``, the state lock is released in a ``finally``
+        so it cannot outlive the migration.
         """
         # Phase 1: dry-run read-only discovery. GET requests only — no
         # mutating HTTP, no git subprocess, no state write, and no
@@ -201,21 +206,33 @@ class MigrationOrchestrator:
         # resume checks, without broadening the legacy already_migrated path.
         self._ensure_concrete_state_loaded()
 
-        # Pre-flight target-repository phase (normal-run path only;
-        # dry-run returns above via _discover_dry_run). Aborts the run
-        # before any git or issue work when the prompt is denied.
-        if not self._prepare_target(result):
+        # Preflight: establish the state path (create, verify, lock) before
+        # any destination write. Detected by a callable ``prepare`` so a
+        # seam exposing only load()/save() keeps the legacy path.
+        prepare_fn = getattr(self.state, "prepare", None)
+        if callable(prepare_fn):
+            prepare_fn()
+
+        try:
+            # Pre-flight target-repository phase (normal-run path only;
+            # dry-run returns above via _discover_dry_run). Aborts the run
+            # before any git or issue work when the prompt is denied.
+            if not self._prepare_target(result):
+                return result
+
+            # Phase 4: Git mirror. Skipped entirely when --skip-git is set.
+            if not bool(getattr(self.repo, "skip_git", False)):
+                self.prepare_repository(result)
+
+            # Phase 5: Issue migration. Always attempted after the Git
+            # phase (or skipped-Git), regardless of push outcome.
+            self._migrate_issues(result)
+
             return result
-
-        # Phase 4: Git mirror. Skipped entirely when --skip-git is set.
-        if not bool(getattr(self.repo, "skip_git", False)):
-            self.prepare_repository(result)
-
-        # Phase 5: Issue migration. Always attempted after the Git
-        # phase (or skipped-Git), regardless of push outcome.
-        self._migrate_issues(result)
-
-        return result
+        finally:
+            release_fn = getattr(self.state, "release", None)
+            if callable(release_fn):
+                release_fn()
 
     # --- dry-run read-only discovery -----------------------------------------
 
@@ -339,6 +356,7 @@ class MigrationOrchestrator:
                 name = target.split("/")[-1] if "/" in target else target
                 public = bool(getattr(repo, "public", False))
                 create(name, description, public)
+                self._concrete_repo_created = True
             return True
 
         # Existing target: never create or PATCH the description.
@@ -501,9 +519,9 @@ class MigrationOrchestrator:
         Sets the orchestrator-owned ``git_pushed`` flag and persists it
         through the existing ``StateStore.save(repo_created, git_pushed,
         migrated)`` channel, preserving the currently known
-        ``repo_created`` and ``migrated`` values. Best-effort:
-        persistence errors are swallowed, mirroring
-        :meth:`_safe_record_issue`. This runs at the end of the Git
+        ``repo_created`` and ``migrated`` values. Persistence failures
+        propagate out of :meth:`run` rather than being swallowed. This
+        runs at the end of the Git
         phase, so the checkpoint lands before issue migration begins.
         On push failure this is never called: ``git_pushed`` stays
         falsy and a later resume retries the Git phase. Legacy seams
@@ -516,14 +534,11 @@ class MigrationOrchestrator:
         save_fn = getattr(self.state, "save", None)
         if not callable(save_fn):
             return
-        try:
-            save_fn(
-                self._concrete_repo_created,
-                self._concrete_git_pushed,
-                dict(self._concrete_migrated),
-            )
-        except Exception:  # noqa: BLE001 — state seam is best-effort
-            return
+        save_fn(
+            self._concrete_repo_created,
+            self._concrete_git_pushed,
+            dict(self._concrete_migrated),
+        )
 
     def _migrate_issues(self, result: MigrationResult) -> None:
         """Enumerate source issues and migrate each one.
@@ -805,7 +820,11 @@ class MigrationOrchestrator:
             return False
 
     def _safe_record_issue(self, source_number: int, github_number: int) -> None:
-        """Forward ``record_issue`` to the state seam, swallowing errors."""
+        """Forward ``record_issue`` to the state seam.
+
+        Persistence failures propagate out of :meth:`run` rather than
+        being swallowed.
+        """
         # Concrete StateStore path: record in orchestrator-owned in-memory
         # state and persist via StateStore.save(repo_created, git_pushed,
         # migrated), preserving repo_created/git_pushed as currently known.
@@ -815,35 +834,30 @@ class MigrationOrchestrator:
             save_fn = getattr(self.state, "save", None)
             if not callable(save_fn):
                 return
-            try:
-                save_fn(
-                    self._concrete_repo_created,
-                    self._concrete_git_pushed,
-                    dict(self._concrete_migrated),
-                )
-            except Exception:  # noqa: BLE001 — state seam is best-effort
-                return
+            save_fn(
+                self._concrete_repo_created,
+                self._concrete_git_pushed,
+                dict(self._concrete_migrated),
+            )
             return
         record = getattr(self.state, "record_issue", None)
         if not callable(record):
             return
-        try:
-            record(source_number, github_number)
-        except Exception:  # noqa: BLE001 — state seam is best-effort
-            return
+        record(source_number, github_number)
 
     def _safe_record_comment(
         self, source_number: int, comment_index: int, response: Any
     ) -> None:
-        """Forward ``record_comment`` to the state seam, swallowing errors."""
+        """Forward ``record_comment`` to the state seam.
+
+        Persistence failures propagate out of :meth:`run` rather than
+        being swallowed.
+        """
         record = getattr(self.state, "record_comment", None)
         if not callable(record):
             return
-        try:
-            github_comment_id = self._extract_comment_id(response)
-            record(source_number, comment_index, github_comment_id)
-        except Exception:  # noqa: BLE001 — state seam is best-effort
-            return
+        github_comment_id = self._extract_comment_id(response)
+        record(source_number, comment_index, github_comment_id)
 
     @staticmethod
     def _extract_comment_id(response: Any) -> int:

@@ -6,7 +6,7 @@ Migrate a repository from [Codeberg](https://codeberg.org) / Forgejo to GitHub �
 
 - **Issues, comments, and labels** — migrated in chronological order (pull requests excluded), with the original Codeberg author and date preserved in a blockquote header.
 - **Git mirror** — clones the source as a mirror and pushes all branches and tags.
-- **Resumable** — progress is checkpointed to `state.json` with atomic writes, so an interrupted migration picks up where it left off instead of duplicating work. If you delete the GitHub repo, delete `state.json` too — otherwise the tool will skip everything the stale state claims is done.
+- **Resumable** — progress is checkpointed with atomic writes, so an interrupted migration picks up where it left off instead of duplicating work. State lives outside your working directory, under the platform's user-state directory (`~/Library/Application Support/f2gh/` on macOS, `~/.local/state/f2gh/` on Linux), namespaced per source→target pair and named `state.json`; pass `--state-file PATH` to keep it somewhere else. If you delete the GitHub repo, delete that state file too — otherwise the tool will skip everything the stale state claims is done.
 - **Rate-limit aware** — backs off with jitter when GitHub throttles rapid POST/PATCH operations.
 - **Dry-run mode** — preview exactly what would be created without touching either forge.
 
@@ -14,6 +14,7 @@ Migrate a repository from [Codeberg](https://codeberg.org) / Forgejo to GitHub �
 
 - Python 3.12+
 - [`gh`](https://cli.github.com/) (optional — used to read your GitHub token if `GITHUB_TOKEN` isn't set)
+- A POSIX system (macOS or Linux). The code is written portably and should run on Windows, but it is only validated on POSIX.
 
 ## Installation
 

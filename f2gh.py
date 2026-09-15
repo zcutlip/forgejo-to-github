@@ -14,12 +14,20 @@ from forgejo_to_github.domain import Repository
 from forgejo_to_github.git import GitMirror
 from forgejo_to_github.github import GitHubClient
 from forgejo_to_github.migration import MigrationOrchestrator
+from forgejo_to_github.paths import default_state_base, state_path_for
 from forgejo_to_github.reporting import Reporter
-from forgejo_to_github.state import StateStore
+from forgejo_to_github.state import (
+    StateLockedError,
+    StateStore,
+    StateWriteError,
+)
 from forgejo_to_github.transport import RequestsTransport
 
 # SIGINT convention: 128 + signal number (SIGINT = 2).
 EXIT_INTERRUPTED = 130
+
+# State-path refusal (preflight could not establish the state file).
+EXIT_STATE_ERROR = 3
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,6 +75,12 @@ def parse_args() -> argparse.Namespace:
         help='Repo description on GitHub (default: copied from Codeberg, fallback "Migrated from Codeberg")',
     )
     parser.add_argument(
+        "--state-file",
+        metavar="PATH",
+        default=None,
+        help="Path to the migration state file (default: per-migration location under the platform user-state directory)",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=__version__,
@@ -95,6 +109,42 @@ def _make_prompter(repo: Repository) -> Callable[[str, bool], bool]:
     return prompter
 
 
+def _split_owner_repo(label: str, value: str) -> tuple[str, str]:
+    """Split an ``OWNER/REPO`` identity, exiting on malformed input.
+
+    ``label`` names the offending flag (``source``/``target``) in the
+    error message, matching the CLI's historical wording.
+    """
+    if "/" not in value:
+        raise SystemExit(
+            f"invalid source/target: {label} must be OWNER/REPO, got {value!r}"
+        )
+    owner, repo_name = value.split("/", 1)
+    if not owner or not repo_name:
+        raise SystemExit(
+            f"invalid source/target: {label} must be OWNER/REPO, got {value!r}"
+        )
+    return owner, repo_name
+
+
+def _resolve_state_path(args: argparse.Namespace) -> Path:
+    """Resolve the migration state file path for this run.
+
+    An explicit ``--state-file`` is used verbatim. Otherwise the state
+    file lives under the platform user-state directory, namespaced per
+    source→target migration so each migration keeps its own checkpoint.
+    ``source``/``target`` are validated before a path is derived.
+    """
+    explicit = getattr(args, "state_file", None)
+    if explicit:
+        return Path(explicit)
+    source = str(getattr(args, "source", ""))
+    target = str(getattr(args, "target", ""))
+    _split_owner_repo("source", source)
+    _split_owner_repo("target", target)
+    return state_path_for(default_state_base(), source, target)
+
+
 def _build_orchestrator(args: argparse.Namespace) -> MigrationOrchestrator:
     """Construct the production :class:`MigrationOrchestrator`.
 
@@ -104,8 +154,8 @@ def _build_orchestrator(args: argparse.Namespace) -> MigrationOrchestrator:
     and builds the five collaborators plus the :class:`Repository`
     value object.
     """
-    # State file path — no --state-file flag in this plan.
-    state_path = Path("state.json")
+    # State file path: explicit --state-file, else the per-migration default.
+    state_path = _resolve_state_path(args)
 
     # Codeberg token — required.
     codeberg_token = os.getenv("CODEBERG_TOKEN")
@@ -131,19 +181,8 @@ def _build_orchestrator(args: argparse.Namespace) -> MigrationOrchestrator:
     # Validate source/target shape — must be OWNER/REPO.
     source = str(getattr(args, "source", ""))
     target = str(getattr(args, "target", ""))
-    for label, value in (("source", source), ("target", target)):
-        if "/" not in value:
-            raise SystemExit(
-                f"invalid source/target: {label} must be OWNER/REPO, got {value!r}"
-            )
-        owner, repo_name = value.split("/", 1)
-        if not owner or not repo_name:
-            raise SystemExit(
-                f"invalid source/target: {label} must be OWNER/REPO, got {value!r}"
-            )
-
-    source_owner, source_repo = source.split("/", 1)
-    target_owner, target_repo = target.split("/", 1)
+    source_owner, source_repo = _split_owner_repo("source", source)
+    target_owner, target_repo = _split_owner_repo("target", target)
 
     codeberg_transport = RequestsTransport()
     github_transport = RequestsTransport()
@@ -198,6 +237,7 @@ def _build_orchestrator(args: argparse.Namespace) -> MigrationOrchestrator:
 
 def main() -> None:
     args = parse_args()
+    state_path = _resolve_state_path(args)
     try:
         orchestrator = _build_orchestrator(args)
         result = orchestrator.run()
@@ -214,11 +254,35 @@ def main() -> None:
             print("Interrupted by user.", file=sys.stderr)
         else:
             print(
-                "Interrupted by user — state saved to ./state.json, "
+                f"Interrupted by user — state saved to {state_path}, "
                 f"resume with f2gh --source {args.source} --target {args.target}",
                 file=sys.stderr,
             )
         sys.exit(EXIT_INTERRUPTED)
+    except StateLockedError as exc:
+        print(
+            "Another f2gh run is already migrating this pair.",
+            file=sys.stderr,
+        )
+        print(f"  State path: {exc.state_path}", file=sys.stderr)
+        print(
+            "  Wait for it to finish, or remove the lock file once it has stopped.",
+            file=sys.stderr,
+        )
+        sys.exit(EXIT_STATE_ERROR)
+    except StateWriteError as exc:
+        print(
+            "Could not write the migration state; stopping.",
+            file=sys.stderr,
+        )
+        print(f"  State path: {exc.path}", file=sys.stderr)
+        print(f"  Reason: {exc.reason}", file=sys.stderr)
+        print(
+            "  The most recent work may not be recorded — check the target "
+            "repository before re-running.",
+            file=sys.stderr,
+        )
+        sys.exit(EXIT_STATE_ERROR)
 
 
 if __name__ == "__main__":

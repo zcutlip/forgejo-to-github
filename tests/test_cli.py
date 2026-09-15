@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -32,6 +33,7 @@ import pytest
 import f2gh
 from forgejo_to_github.__about__ import __version__
 from forgejo_to_github.about import about
+from forgejo_to_github.state import StateLockedError, StateWriteError
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -391,12 +393,57 @@ def test_main_keyboard_interrupt_prints_resume_hint_and_exits_130(
 
     captured = capsys.readouterr()
     assert "Interrupted by user" in captured.err
-    assert "state saved to ./state.json" in captured.err
+    assert "state saved to" in captured.err
+    assert "./state.json" not in captured.err
+    assert "owner/source/owner/target/state.json" in captured.err
     assert (
         "resume with f2gh --source owner/source --target owner/target" in captured.err
     )
     assert "Traceback" not in captured.err
     assert "Traceback" not in captured.out
+
+
+def test_main_state_file_flag_is_honored_verbatim(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An explicit state file path is used as given, not namespaced or rewritten.
+
+    The interrupt notice reports the resolved state path, so an operator who
+    supplied their own path sees exactly that path.
+    """
+    custom_state = tmp_path / "custom-state.json"
+    args = argparse.Namespace(
+        source="owner/source",
+        target="owner/target",
+        dry_run=False,
+        yes=True,
+        skip_git=True,
+        public=False,
+        description=None,
+        state_file=str(custom_state),
+    )
+    fake_orchestrator = Mock()
+    fake_orchestrator.run.side_effect = KeyboardInterrupt
+
+    with (
+        patch.object(f2gh, "parse_args", return_value=args),
+        patch.object(f2gh, "_build_orchestrator", return_value=fake_orchestrator),
+        patch.object(f2gh.sys, "exit") as mock_exit,
+    ):
+        try:
+            f2gh.main()
+        except KeyboardInterrupt:
+            pytest.fail(
+                "main() let KeyboardInterrupt escape instead of handling it "
+                "and exiting 130"
+            )
+
+    mock_exit.assert_called_once_with(130)
+
+    captured = capsys.readouterr()
+    assert str(custom_state) in captured.err
+    assert "owner/source/owner/target/state.json" not in captured.err
 
 
 def test_main_keyboard_interrupt_dry_run_does_not_claim_state_saved(
@@ -465,3 +512,90 @@ def test_main_non_interrupt_exception_propagates() -> None:
         f2gh.main()
 
     mock_exit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 9. State path failures in main()
+# ---------------------------------------------------------------------------
+
+
+def test_main_refuses_to_start_when_the_state_path_is_unusable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An unusable state path stops the run before anything is migrated.
+
+    The operator is told which resolved path failed, and nothing that looks
+    like a successful migration is emitted.
+    """
+    unreachable = tmp_path / "blocker" / "state.json"
+    args = argparse.Namespace(
+        source="owner/source",
+        target="owner/target",
+        dry_run=False,
+        yes=True,
+        skip_git=True,
+        public=False,
+        description=None,
+        state_file=str(unreachable),
+    )
+    fake_orchestrator = Mock()
+    fake_orchestrator.run.side_effect = StateWriteError(unreachable, "not a directory")
+
+    with (
+        patch.object(f2gh, "parse_args", return_value=args),
+        patch.object(f2gh, "_build_orchestrator", return_value=fake_orchestrator),
+        patch.object(f2gh.sys, "exit") as mock_exit,
+    ):
+        f2gh.main()
+
+    mock_exit.assert_called_once_with(f2gh.EXIT_STATE_ERROR)
+
+    captured = capsys.readouterr()
+    assert str(unreachable) in captured.err
+    assert "nothing was migrated" not in captured.err
+    assert "Migration complete" not in captured.out
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
+
+
+def test_main_reports_lock_contention_distinctly(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Contention and an unusable path must not produce the same message.
+
+    Both refuse to start, but "another run holds this path" and "this path
+    cannot be written" call for different responses, so the operator must be
+    able to tell them apart from the output alone.
+    """
+    state_path = tmp_path / "state.json"
+
+    def _stderr_for(error: BaseException) -> str:
+        args = argparse.Namespace(
+            source="owner/source",
+            target="owner/target",
+            dry_run=False,
+            yes=True,
+            skip_git=True,
+            public=False,
+            description=None,
+            state_file=str(state_path),
+        )
+        fake_orchestrator = Mock()
+        fake_orchestrator.run.side_effect = error
+        with (
+            patch.object(f2gh, "parse_args", return_value=args),
+            patch.object(f2gh, "_build_orchestrator", return_value=fake_orchestrator),
+            patch.object(f2gh.sys, "exit") as mock_exit,
+        ):
+            f2gh.main()
+        mock_exit.assert_called_once_with(f2gh.EXIT_STATE_ERROR)
+        return capsys.readouterr().err
+
+    contention = _stderr_for(StateLockedError(state_path))
+    unusable = _stderr_for(StateWriteError(state_path, "permission denied"))
+
+    assert str(state_path) in contention
+    assert "nothing was migrated" not in contention
+    assert contention != unusable
