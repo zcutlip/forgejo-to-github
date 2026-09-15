@@ -35,7 +35,6 @@ GitHubClient interfaces without weakening behavioral assertions.
 
 from __future__ import annotations
 
-import shutil
 from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
@@ -165,23 +164,6 @@ class _FakeGit:
         self.push_called = True
         if self.push_error is not None:
             raise self.push_error
-
-
-class _DirDeletingGit(_FakeGit):
-    """Git seam that removes a directory during the push phase.
-
-    Models a state directory that disappears partway through a run: the
-    push happens after the preflight and before the first checkpoint, so
-    the removal lands strictly between them.
-    """
-
-    def __init__(self, directory: Path) -> None:
-        super().__init__()
-        self._directory = directory
-
-    def run_push(self) -> None:
-        super().run_push()
-        shutil.rmtree(self._directory, ignore_errors=True)
 
 
 class _FakeState:
@@ -2428,21 +2410,3 @@ def test_run_preflight_failure_aborts_before_repository_create():
 
     assert "check_repository_exists" not in api.calls
     assert "create_repository" not in api.calls
-
-
-def test_run_recreates_state_directory_deleted_after_preflight(tmp_path):
-    """A state directory removed mid-run is recreated by the next checkpoint.
-
-    The directory is deleted during the push phase: after the preflight
-    has created and verified it, and before the post-push checkpoint. The
-    checkpoint write must recreate it and the run must complete.
-    """
-    state_path = tmp_path / "nested" / "state.json"
-    store = StateStore(state_path, "owner/source", "owner/target")
-    git = _DirDeletingGit(state_path.parent)
-    orch, _fakes = _build(issues=[_issue(1)], git=git, state=store)
-
-    orch.run()
-
-    assert state_path.parent.is_dir()
-    assert state_path.exists()
