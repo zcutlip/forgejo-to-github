@@ -356,6 +356,7 @@ class MigrationOrchestrator:
                 name = target.split("/")[-1] if "/" in target else target
                 public = bool(getattr(repo, "public", False))
                 create(name, description, public)
+                self._concrete_repo_created = True
             return True
 
         # Existing target: never create or PATCH the description.
