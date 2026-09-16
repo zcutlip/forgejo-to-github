@@ -37,6 +37,9 @@ class Repository:
             GET discovery requests are issued — no mutating HTTP, no
             git subprocess, and no checkpoint writes.
         yes: When ``True``, skip any interactive confirmation prompts.
+        mirror_path: Resolved location of the cached git mirror for this
+            run. Set by the CLI; ``None`` (non-CLI construction) falls
+            back to the platform default cache location.
     """
 
     source: str
@@ -46,6 +49,7 @@ class Repository:
     skip_git: bool = False
     dry_run: bool = False
     yes: bool = False
+    mirror_path: str | None = None
 
 
 @dataclass
