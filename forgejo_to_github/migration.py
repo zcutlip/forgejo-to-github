@@ -22,11 +22,14 @@ Phase ordering
    no failures, and sets ``dry_run=True``. The reporter is not called
    during a dry-run; the CLI owns the dry-run final summary.
 2. **Git mirror.** When ``repo.skip_git`` is not set, the orchestrator
-   invokes the injected Git seam's ``run_clone()`` and then
-   ``run_push()``. A clone failure is terminal: the exception
-   propagates. A push failure is non-fatal: ``git["push"]`` is set to
-   ``"failed"``, ``reporter.git_phase_finished("failed")`` is called,
-   and issue migration proceeds.
+   drives the injected Git seam's cache-aware flow
+   (``cached_mirror_is_valid`` → ``clone_into`` → ``push_branches`` /
+   ``push_tags`` with ``cleanup`` on success). A clone failure is
+   terminal: the exception propagates. A push failure is non-fatal:
+   ``git["push"]`` is set to ``"failed"``,
+   ``reporter.git_phase_finished("failed")`` is called, and issue
+   migration proceeds. Legacy ``run_clone()`` / ``run_push()`` fakes
+   keep a narrow fallback path.
 3. **Issue migration.** Each source issue is processed through the
    per-issue state machine (create → comments → checkpoint).
    Per-issue failures are accumulated into
@@ -80,6 +83,7 @@ from forgejo_to_github.domain import (
     Repository,
 )
 from forgejo_to_github.formatting import format_comment_body, format_issue_body
+from forgejo_to_github.paths import cache_path_for, default_cache_base
 
 # Default color substituted by the orchestrator when a source label
 # lacks one. The GitHub client does not default colors; this constant
@@ -176,6 +180,7 @@ class MigrationOrchestrator:
         self._concrete_migrated: dict[int, int] = {}
         self._concrete_repo_created: bool = False
         self._concrete_git_pushed: bool = False
+        self._concrete_clone_path: str | None = None
 
     # --- public entry point --------------------------------------------------
 
@@ -381,6 +386,85 @@ class MigrationOrchestrator:
 
     # --- public phase entry points -------------------------------------------
 
+    def _resolve_mirror_path(self) -> str:
+        """Return the cache location for this run's git mirror.
+
+        An explicit ``Repository.mirror_path`` (always set by the CLI)
+        wins. Otherwise the platform default is derived from
+        ``default_cache_base()`` and ``cache_path_for()`` so direct
+        (non-CLI) construction keeps working instead of crashing.
+        """
+        explicit = getattr(self.repo, "mirror_path", None)
+        if isinstance(explicit, str) and explicit:
+            return explicit
+        source = str(getattr(self.repo, "source", ""))
+        target = str(getattr(self.repo, "target", ""))
+        return str(cache_path_for(default_cache_base(), source, target))
+
+    def _cache_is_reusable(self, mirror_path: str) -> bool:
+        """Whether the cached mirror can be pushed from without re-cloning.
+
+        Delegates to the git seam's ``cached_mirror_is_valid`` probe.
+        A seam without the probe never reuses (safe direction: fresh
+        clone through ``clone_into``).
+        """
+        probe = getattr(self.git, "cached_mirror_is_valid", None)
+        if not callable(probe):
+            return False
+        return bool(probe(mirror_path))
+
+    def _checkpoint_clone_path(self, local_path: str) -> None:
+        """Persist the clone location through the concrete state path.
+
+        Records the orchestrator-owned ``clone_path`` and saves it via
+        ``StateStore.save(..., clone_path=...)``, preserving the
+        currently known ``repo_created``/``git_pushed``/``migrated``
+        values. Persistence failures propagate out of :meth:`run`
+        (fail-fast, exit 3) rather than being swallowed. Legacy seams
+        without ``load()``/``save()`` are untouched.
+        """
+        if not self._is_concrete_state_store():
+            return
+        self._ensure_concrete_state_loaded()
+        self._concrete_clone_path = local_path
+        save_fn = getattr(self.state, "save", None)
+        if not callable(save_fn):
+            return
+        save_fn(
+            self._concrete_repo_created,
+            self._concrete_git_pushed,
+            dict(self._concrete_migrated),
+            clone_path=self._concrete_clone_path,
+        )
+
+    def _save_checkpoint(self) -> None:
+        """Persist orchestrator-owned concrete state through the seam.
+
+        Forwards ``repo_created``/``git_pushed``/``migrated`` as
+        currently known, plus ``clone_path`` only when a clone has been
+        checkpointed in this run. Passing the keyword unconditionally
+        would break seams implementing the pre-``clone_path`` save
+        shape, so the legacy three-argument call is preserved when
+        there is nothing new to record. Persistence failures
+        propagate (fail-fast) rather than being swallowed.
+        """
+        save_fn = getattr(self.state, "save", None)
+        if not callable(save_fn):
+            return
+        if self._concrete_clone_path is None:
+            save_fn(
+                self._concrete_repo_created,
+                self._concrete_git_pushed,
+                dict(self._concrete_migrated),
+            )
+        else:
+            save_fn(
+                self._concrete_repo_created,
+                self._concrete_git_pushed,
+                dict(self._concrete_migrated),
+                clone_path=self._concrete_clone_path,
+            )
+
     def prepare_repository(self, result: MigrationResult) -> None:
         """Drive the Git seam: clone the source mirror, then push it.
 
@@ -408,11 +492,17 @@ class MigrationOrchestrator:
 
         Git lifecycle (concrete ``GitMirror``)
         --------------------------------------
-        The concrete ``GitMirror`` API is ``clone() -> str``,
+        The concrete ``GitMirror`` API is ``clone_into(path) -> str``,
+        ``cached_mirror_is_valid(path) -> bool``,
         ``push_branches(local_path)``, ``push_tags(local_path)`` and
-        ``cleanup(local_path)``. ``cleanup`` is guaranteed to run in a
-        ``finally`` block after a successful ``clone``, even when a
-        push fails. This ordering is asserted by
+        ``cleanup(local_path)``. The mirror lives at the per-migration
+        cache path (``Repository.mirror_path``, or the derived platform
+        default): a valid cache is pushed from without re-cloning; an
+        invalid cache is removed via ``cleanup`` before a fresh clone.
+        After a successful clone the path is checkpointed through the
+        state seam immediately. ``cleanup`` runs after a successful
+        push (deleting the cache); on push failure the cache is kept
+        for retry. This ordering is asserted by
         ``tests/test_concrete_integration.py``.
 
         Test seam
@@ -420,11 +510,11 @@ class MigrationOrchestrator:
         To keep the fake-based orchestration tests in
         ``tests/test_orchestration.py`` passing without hiding the
         concrete path, this method detects the concrete API by the
-        presence of a callable ``clone`` attribute. When ``clone`` is
-        present the concrete lifecycle above is used. Otherwise it
-        falls back to the legacy ``run_clone``/``run_push`` seam used
-        only by those fakes. The fallback is narrow and documented
-        here; no broad dual-API complexity is introduced.
+        presence of a callable ``clone_into`` attribute. When
+        ``clone_into`` is present the concrete lifecycle above is used.
+        Otherwise it falls back to the legacy ``run_clone``/``run_push``
+        seam used only by those fakes. The fallback is narrow and
+        documented here; no broad dual-API complexity is introduced.
 
         Resume
         ------
@@ -447,44 +537,56 @@ class MigrationOrchestrator:
             return
 
         # Concrete GitMirror path — preferred. Detected by presence of
-        # callable ``clone`` so the concrete lifecycle is never hidden
-        # when a real GitMirror is injected.
-        clone_fn = getattr(self.git, "clone", None)
-        if callable(clone_fn):
-            # Clone is terminal. Any raise propagates out of ``run``
-            # and the result is never returned to the caller for this run.
-            local_path = clone_fn()
-            result.git["clone"] = "ok"
-            result.clone_status = "ok"
+        # callable ``clone_into`` so the concrete lifecycle is never
+        # hidden when a real GitMirror is injected.
+        clone_into_fn = getattr(self.git, "clone_into", None)
+        if callable(clone_into_fn):
+            mirror_path = self._resolve_mirror_path()
+            if self._cache_is_reusable(mirror_path):
+                local_path = mirror_path
+            else:
+                # Invalid or missing cache: remove it via the cleanup
+                # seam (scoped to the resolved cache path) before the
+                # fresh clone. A removal failure is a hard error and
+                # propagates; a clone failure stays terminal.
+                evict_fn = getattr(self.git, "cleanup", None)
+                if callable(evict_fn):
+                    evict_fn(mirror_path)
+                # Clone is terminal. Any raise propagates out of ``run``
+                # and the result is never returned to the caller for this run.
+                local_path = str(clone_into_fn(mirror_path))
+                self._checkpoint_clone_path(local_path)
+                result.git["clone"] = "ok"
+                result.clone_status = "ok"
 
             push_failed = False
+            # Branch push is non-fatal; continue to tag push even on failure.
             try:
-                # Branch push is non-fatal; continue to tag push even on failure.
-                try:
-                    push_branches = getattr(self.git, "push_branches", None)
-                    if callable(push_branches):
-                        push_branches(local_path)
-                except Exception:  # noqa: BLE001 — non-fatal branch push
-                    push_failed = True
+                push_branches = getattr(self.git, "push_branches", None)
+                if callable(push_branches):
+                    push_branches(local_path)
+            except Exception:  # noqa: BLE001 — non-fatal branch push
+                push_failed = True
 
-                try:
-                    push_tags = getattr(self.git, "push_tags", None)
-                    if callable(push_tags):
-                        push_tags(local_path)
-                except Exception:  # noqa: BLE001 — non-fatal tag push
-                    push_failed = True
+            try:
+                push_tags = getattr(self.git, "push_tags", None)
+                if callable(push_tags):
+                    push_tags(local_path)
+            except Exception:  # noqa: BLE001 — non-fatal tag push
+                push_failed = True
 
-                if push_failed:
-                    result.git["push"] = "failed"
-                    result.push_status = "failed"
-                    self._safe_git_phase_finished("failed")
-                else:
-                    result.git["push"] = "ok"
-                    result.push_status = "ok"
-                    self._safe_git_phase_finished("ok")
-                    self._mark_git_pushed()
-            finally:
-                # cleanup runs even after push failures, after successful clone
+            if push_failed:
+                result.git["push"] = "failed"
+                result.push_status = "failed"
+                self._safe_git_phase_finished("failed")
+                # The cache is kept so the next run retries the push
+                # without re-cloning: no cleanup on this path.
+            else:
+                result.git["push"] = "ok"
+                result.push_status = "ok"
+                self._safe_git_phase_finished("ok")
+                self._mark_git_pushed()
+                # Success deletes the cache via the cleanup seam.
                 cleanup_fn = getattr(self.git, "cleanup", None)
                 if callable(cleanup_fn):
                     with contextlib.suppress(Exception):
@@ -517,9 +619,9 @@ class MigrationOrchestrator:
         """Checkpoint a successful Git push via the concrete state path.
 
         Sets the orchestrator-owned ``git_pushed`` flag and persists it
-        through the existing ``StateStore.save(repo_created, git_pushed,
-        migrated)`` channel, preserving the currently known
-        ``repo_created`` and ``migrated`` values. Persistence failures
+        through the existing ``StateStore.save`` channel, preserving the
+        currently known ``repo_created``, ``migrated``, and any
+        checkpointed ``clone_path`` values. Persistence failures
         propagate out of :meth:`run` rather than being swallowed. This
         runs at the end of the Git
         phase, so the checkpoint lands before issue migration begins.
@@ -531,14 +633,7 @@ class MigrationOrchestrator:
             return
         self._ensure_concrete_state_loaded()
         self._concrete_git_pushed = True
-        save_fn = getattr(self.state, "save", None)
-        if not callable(save_fn):
-            return
-        save_fn(
-            self._concrete_repo_created,
-            self._concrete_git_pushed,
-            dict(self._concrete_migrated),
-        )
+        self._save_checkpoint()
 
     def _migrate_issues(self, result: MigrationResult) -> None:
         """Enumerate source issues and migrate each one.
@@ -779,7 +874,8 @@ class MigrationOrchestrator:
         if not self._is_concrete_state_store():
             self._concrete_state_loaded = True
             return
-        # load() -> dict with keys source/target/repo_created/git_pushed/migrated
+        # load() -> dict with keys source/target/repo_created/git_pushed/
+        # migrated/clone_path
         data = (
             self.state.load()
         )  # let StateLoadError propagate; fresh file returns defaults
@@ -793,6 +889,10 @@ class MigrationOrchestrator:
             self._concrete_migrated = {}
         self._concrete_repo_created = bool(data.get("repo_created", False))
         self._concrete_git_pushed = bool(data.get("git_pushed", False))
+        raw_clone_path = data.get("clone_path", None)
+        self._concrete_clone_path = (
+            raw_clone_path if isinstance(raw_clone_path, str) else None
+        )
         self._concrete_state_loaded = True
 
     # --- collaborator wrappers (duck-typed) ----------------------------------
@@ -831,14 +931,7 @@ class MigrationOrchestrator:
         if self._is_concrete_state_store():
             self._ensure_concrete_state_loaded()
             self._concrete_migrated[source_number] = github_number
-            save_fn = getattr(self.state, "save", None)
-            if not callable(save_fn):
-                return
-            save_fn(
-                self._concrete_repo_created,
-                self._concrete_git_pushed,
-                dict(self._concrete_migrated),
-            )
+            self._save_checkpoint()
             return
         record = getattr(self.state, "record_issue", None)
         if not callable(record):
