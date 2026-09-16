@@ -29,8 +29,11 @@ cache, rooted at `platformdirs.user_cache_dir("f2gh")`.
    `paths.py` → `<base>/<src-owner>/<src-repo>/<tgt-owner>/<tgt-repo>/mirror.git`,
    where `base` is `user_cache_dir("f2gh")`. The CLI resolves it
    (validate → resolve → construct, same order as #14). `GitMirror` and
-   `StateStore` take explicit values; neither gains a path default. Never
-   cwd-relative.
+   `StateStore` take explicit values; neither gains a path default.
+   `Repository` carries the resolved location as optional `mirror_path`
+   (default `None`); the CLI always sets it, and the orchestrator derives
+   the platform default when it is `None` (non-CLI construction).
+   Never cwd-relative.
 2. **GitMirror owns git knowledge.** Two new methods (stays under the
    9-public-method cap):
    - `clone_into(path)`: `git clone --mirror` into the given directory;
@@ -59,7 +62,9 @@ cache, rooted at `platformdirs.user_cache_dir("f2gh")`.
    re-cloning.
 5. **Schema.** `ACCEPTED_KEYS` += `"clone_path"`; `StateStore.save()`
    gains optional `clone_path: str | None = None`; `load()` returns it
-   (absent → `None`, so legacy files stay valid). No version bump: no
+   (absent → `None`, so legacy files stay valid). `save()` omits the key
+   when `clone_path` is `None`, so runs that never cloned keep the exact
+   pre-existing on-disk shape. No version bump: no
    backward-compatibility requirement (single user). Old `save()` calls
    keep working, so locked tests stay green without a RED reopen.
 6. **`f2gh --clean`.** Removes this migration's cached mirror — and only
@@ -75,6 +80,9 @@ cache, rooted at `platformdirs.user_cache_dir("f2gh")`.
   for retries; `--clean` flag in this issue for manual eviction.
 - **Schema placement:** `clone_path` key in `state.json` (not a sidecar file).
 - **Staleness:** push-as-is on resume, no refresh fetch.
+- **Path plumbing:** optional `Repository.mirror_path` (default `None`)
+  with orchestrator-derived platform default when unset.
+- **Unset serialization:** `save()` omits `clone_path` when `None`.
 
 ## RED (tests lock this contract; separate gate)
 
