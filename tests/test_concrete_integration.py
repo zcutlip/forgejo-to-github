@@ -37,7 +37,7 @@ with one primary reason to fail:
   Git/GitHub failures.
 
 If any collaborator method was renamed, re-typed, or re-scoped
-(e.g. GitMirror.clone vs run_clone, GitHubClient.create_issue(title, body, labels)
+(e.g. GitMirror.clone_into vs clone, GitHubClient.create_issue(title, body, labels)
 vs create_issue(payload dict), StateStore.load/save vs already_migrated/record_issue),
 the relevant test must fail with AttributeError/TypeError or a concrete assertion
 failure — they intentionally do not accommodate the current broken wiring.
@@ -182,29 +182,22 @@ def _make_recording_reporter() -> tuple[Reporter, RecordingSink, RecordingSink]:
 
 def _build_real_git_mirror(
     tmp_path: Path,
-) -> tuple[GitMirror, FakeRunner, list[str], list[str]]:
+) -> tuple[GitMirror, FakeRunner, list[str], str]:
     runner = FakeRunner()
     cleanup_calls: list[str] = []
-    created_dirs: list[str] = []
+    cache_path = str(tmp_path / "mirror")
 
     def fake_cleanup(path: str, *args: Any, **kwargs: Any) -> None:
         cleanup_calls.append(path)
-
-    def fake_tempdir_factory(prefix: str | None = None, **kwargs: Any) -> str:
-        d = tmp_path / f"{prefix or 'f2gh'}-mirror"
-        d.mkdir(parents=True, exist_ok=True)
-        created_dirs.append(str(d))
-        return str(d)
 
     git = GitMirror(
         source_url="https://codeberg.org/owner/source.git",
         target_url="https://github.com/owner/target.git",
         github_token="gh-token",
         command_runner=runner,
-        tempdir_factory=fake_tempdir_factory,
         cleanup=fake_cleanup,
     )
-    return git, runner, cleanup_calls, created_dirs
+    return git, runner, cleanup_calls, cache_path
 
 
 # -- Fake collaborators sufficient for Git wiring test (reach Git phase) --
@@ -278,9 +271,9 @@ class _FakeGitSuccess:
         self.push_tags_calls: list[str] = []
         self.cleanup_calls: list[str] = []
 
-    def clone(self) -> str:
-        self.clone_calls.append("clone")
-        return "/tmp/fake-mirror"
+    def clone_into(self, local_path: str) -> str:
+        self.clone_calls.append(local_path)
+        return local_path
 
     def push_branches(self, local_path: str) -> None:
         self.push_branches_calls.append(local_path)
@@ -386,14 +379,19 @@ def test_git_wiring_lifecycle_orders_clone_then_push_branches_then_push_tags_the
     Asserts clone → push_branches(--all) → push_tags(--tags) → cleanup ordering.
     Uses fake Codeberg/GitHub/state/reporter seams sufficient to reach/complete
     the Git phase, matching concrete orchestrator API after implementation intent.
-    Currently RED on orchestrator/GitMirror method mismatch
-    (run_clone/run_push vs clone/push_branches/push_tags/cleanup).
+    Currently RED on the issue-#5 clone-cache contract: the orchestrator and
+    GitMirror do not yet implement clone_into / cache validation /
+    Repository.mirror_path.
     """
-    repo = _make_repo(dry_run=False, skip_git=False)
+    git, runner, cleanup_calls, cache_path = _build_real_git_mirror(tmp_path)
+    repo = Repository(
+        source="owner/source",
+        target="owner/target",
+        mirror_path=cache_path,
+    )
     state = _FakeStateForGitAndGithub()
     codeberg = _FakeCodebergEmpty()
     github = _FakeGitHubEmpty()
-    git, runner, cleanup_calls, created_dirs = _build_real_git_mirror(tmp_path)
     reporter, _out, _err = _make_recording_reporter()
 
     orchestrator = MigrationOrchestrator(
@@ -420,13 +418,12 @@ def test_git_wiring_lifecycle_orders_clone_then_push_branches_then_push_tags_the
         f"Git phase ordering broken: clone {clone_indices}, --all {push_all_indices}, --tags {push_tags_indices}"
     )
     assert cleanup_calls, "Git cleanup was not invoked"
-    assert created_dirs, "tempdir_factory was not invoked"
-    assert cleanup_calls[0] == created_dirs[0], (
-        f"cleanup path {cleanup_calls[0]!r} != clone path {created_dirs[0]!r}"
+    assert cleanup_calls[0] == cache_path, (
+        f"cleanup path {cleanup_calls[0]!r} != clone path {cache_path!r}"
     )
     clone_argv = runner.calls[clone_indices[0]]
     assert "https://codeberg.org/owner/source.git" in clone_argv
-    assert created_dirs[0] in clone_argv
+    assert cache_path in clone_argv
 
     # Git status in result should reflect ok (or at least not skipped/failed)
     git_status = getattr(result, "git", {})

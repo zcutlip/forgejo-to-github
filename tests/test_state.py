@@ -51,4 +51,5 @@ def test_save_and_load_state_round_trip(tmp_path: Path) -> None:
         "repo_created": True,
         "git_pushed": False,
         "migrated": {12: 34},
+        "clone_path": None,
     }

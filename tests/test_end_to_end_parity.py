@@ -306,11 +306,6 @@ def test_orchestrator_end_to_end_parity_with_real_payload_shapes(
     runner = FakeRunner()
     cleanup_calls: list[str] = []
 
-    def fake_tempdir_factory(prefix: str | None = None, **kwargs: Any) -> str:
-        d = tmp_path / f"{prefix or 'f2gh'}-mirror"
-        d.mkdir(parents=True, exist_ok=True)
-        return str(d)
-
     def fake_cleanup(path: str, *args: Any, **kwargs: Any) -> None:
         cleanup_calls.append(path)
 
@@ -319,7 +314,6 @@ def test_orchestrator_end_to_end_parity_with_real_payload_shapes(
         target_url="https://github.com/owner/target.git",
         github_token="gh-token",
         command_runner=EventRunner(runner, events),
-        tempdir_factory=fake_tempdir_factory,
         cleanup=fake_cleanup,
     )
 
@@ -331,7 +325,13 @@ def test_orchestrator_end_to_end_parity_with_real_payload_shapes(
     out, err = RecordingSink(), RecordingSink()
     reporter = Reporter(output=out, error_output=err)
 
-    repo = Repository(source="owner/source", target="owner/target", skip_git=False, yes=True)
+    repo = Repository(
+        source="owner/source",
+        target="owner/target",
+        skip_git=False,
+        yes=True,
+        mirror_path=str(tmp_path / "mirror"),
+    )
 
     orchestrator = MigrationOrchestrator(
         repo=repo,
@@ -465,7 +465,6 @@ def test_orchestrator_end_to_end_parity_with_real_payload_shapes(
         target_url="https://github.com/owner/target.git",
         github_token="gh-token",
         command_runner=runner2,
-        tempdir_factory=fake_tempdir_factory,
         cleanup=fake_cleanup,
     )
     state2 = StateStore(state_path, source="owner/source", target="owner/target")

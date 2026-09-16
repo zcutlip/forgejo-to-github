@@ -683,16 +683,11 @@ def test_dry_run_makes_no_subprocess_calls() -> None:
         commands.append(list(argv))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    def fake_tempdir(prefix: str | None = None, **kwargs: Any) -> str:
-        # Recording-only: never creates a real directory.
-        return "/nonexistent-fake-tempdir"
-
     git_mirror = GitMirror(
         source_url="https://codeberg.org/owner/source.git",
         target_url="https://github.com/owner/target.git",
         github_token="not-a-real-token",
         command_runner=recording_runner,
-        tempdir_factory=fake_tempdir,
         cleanup=lambda path: None,
     )
     transport = _ScriptedDiscoveryTransport(issues=[_issue(1)])
@@ -1638,9 +1633,9 @@ def test_orchestrator_runs_preflight_before_git_phase() -> None:
     codeberg.list_issues = ordered_list  # type: ignore[method-assign]
 
     class _OrderedGit:
-        def clone(self) -> str:
-            order.append("git.clone")
-            return "/tmp/fake-clone"
+        def clone_into(self, local_path: str) -> str:
+            order.append("git.clone_into")
+            return local_path
 
         def push_branches(self, local_path: str) -> None:
             pass
@@ -1668,7 +1663,7 @@ def test_orchestrator_runs_preflight_before_git_phase() -> None:
     assert order == [
         "check_repository_exists",
         "create_repository",
-        "git.clone",
+        "git.clone_into",
         "list_issues",
     ], (
         "preflight must run before git clone, which must run before "

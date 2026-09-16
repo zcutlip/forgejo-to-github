@@ -53,6 +53,7 @@ def test_load_returns_default_state_when_file_absent(tmp_path):
         "repo_created": False,
         "git_pushed": False,
         "migrated": {},
+        "clone_path": None,
     }
 
 
@@ -83,6 +84,7 @@ def test_load_ignores_checkpoint_with_mismatched_source(tmp_path):
         "repo_created": False,
         "git_pushed": False,
         "migrated": {},
+        "clone_path": None,
     }
 
 
@@ -109,6 +111,7 @@ def test_load_ignores_checkpoint_with_mismatched_target(tmp_path):
         "repo_created": False,
         "git_pushed": False,
         "migrated": {},
+        "clone_path": None,
     }
 
 
@@ -372,3 +375,65 @@ def test_save_fsyncs_the_parent_directory_after_replace(tmp_path):
     assert fsync_targets, "save() must fsync at least once"
     assert fsync_targets[0] is False, "the temp file is fsynced before the rename"
     assert fsync_targets.count(True) == 1, "exactly one directory fsync"
+
+
+# --- contract 10 (issue #5): clone_path checkpoint ----------------------------
+
+
+def test_save_accepts_clone_path_keyword():
+    """save() accepts an optional ``clone_path`` keyword (default None)."""
+    import inspect
+
+    sig = inspect.signature(StateStore.save)
+    params = sig.parameters
+    assert "clone_path" in params, "save() must accept a 'clone_path' keyword"
+    assert params["clone_path"].default is None
+
+
+def test_save_persists_clone_path_and_load_returns_it(tmp_path):
+    """The checkpointed clone location round-trips through save()/load()."""
+    store = _store(tmp_path)
+    store.save(
+        repo_created=False,
+        git_pushed=False,
+        migrated={},
+        clone_path=str(tmp_path / "mirror"),
+    )
+
+    on_disk = json.loads((tmp_path / "state.json").read_text())
+    assert on_disk["clone_path"] == str(tmp_path / "mirror")
+
+    reloaded = store.load()
+    assert reloaded["clone_path"] == str(tmp_path / "mirror")
+
+
+def test_load_returns_none_clone_path_when_absent(tmp_path):
+    """Checkpoints written before issue #5 carry no ``clone_path`` key;
+    load() normalizes the absence to None.
+    """
+    (tmp_path / "state.json").write_text(
+        json.dumps(
+            {
+                "source": "owner/source",
+                "target": "owner/target",
+                "repo_created": False,
+                "git_pushed": False,
+                "migrated": {},
+            }
+        )
+    )
+
+    assert _store(tmp_path).load()["clone_path"] is None
+
+
+def test_save_omits_clone_path_when_unset(tmp_path):
+    """A disclosed guard: save() without ``clone_path`` writes no such key.
+
+    Passes today because save() knows no ``clone_path`` at all — GREEN
+    must preserve the omission so pre-existing on-disk shape assertions
+    (exact-dict) keep holding for runs that never cloned.
+    """
+    store = _store(tmp_path)
+    store.save(repo_created=False, git_pushed=False, migrated={})
+
+    assert "clone_path" not in json.loads((tmp_path / "state.json").read_text())

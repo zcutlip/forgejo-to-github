@@ -3,7 +3,7 @@
 Legacy harness (``f2gh.mirror_git_repo`` + ``subprocess``/``get_github_token``
 mocks) is removed in stage 06. These tests now drive
 ``forgejo_to_github.git.GitMirror`` directly with injected
-``command_runner`` / ``tempdir_factory`` / ``cleanup`` fakes, preserving
+``command_runner`` / ``cleanup`` fakes, preserving
 every observable contract that plan 01 introduced without touching the
 removed ``f2gh`` symbols.
 
@@ -17,7 +17,7 @@ Preserved behavioral contracts
   docs pointers, distinct from clone failures.
 * Every command line and stderr surfaced through an exception or log
   record is run through ``redact_token`` – no raw GitHub token leak.
-* Injected runner / token / tempdir factory discipline – tests stay
+* Injected runner / token / cleanup discipline – tests stay
   offline and concrete.
 
 Redundant tests removed (already directly covered by dedicated tests in
@@ -127,18 +127,6 @@ class _FakeRunner:
         return _CP(args)
 
 
-@dataclass
-class _FakeTempdirFactory:
-    root: Any
-    created: list[str] = field(default_factory=list)
-
-    def __call__(self, suffix: str | None = None, prefix: str | None = None) -> str:
-        path = self.root / f"{prefix or 'f2gh'}-{len(self.created)}{suffix or ''}"
-        path.mkdir(parents=True, exist_ok=True)
-        self.created.append(str(path))
-        return str(path)
-
-
 # ---------------------------------------------------------------------------
 # 1. Clone network failure — terminal, network advisory, no token leak, no push
 # ---------------------------------------------------------------------------
@@ -172,7 +160,7 @@ def test_clone_network_failure_is_terminal_with_network_advice_no_token_leak(
         ),
     )
     runner = _FakeRunner(responses={"clone": clone_err})
-    fs_factory = _FakeTempdirFactory(root=tmp_path)
+    cache_path = str(tmp_path / "mirror")
     caplog.set_level(logging.INFO)
 
     mirror = GitMirror(
@@ -180,11 +168,10 @@ def test_clone_network_failure_is_terminal_with_network_advice_no_token_leak(
         target_url="https://github.com/owner/target.git",
         github_token=GITHUB_TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
 
     with pytest.raises(GitCloneError) as exc_info:
-        mirror.clone()
+        mirror.clone_into(cache_path)
 
     text = str(exc_info.value)
     # Cause / remediation / docs ordering.
@@ -208,10 +195,8 @@ def test_clone_network_failure_is_terminal_with_network_advice_no_token_leak(
     push_calls = [c for c in runner.calls if "push" in c]
     assert not push_calls, f"push invoked despite clone failure: {push_calls!r}"
 
-    # Temp directory was created but not removed by clone itself; cleanup remains
-    # callable and idempotent (mirrors the legacy finally-rmtree guarantee).
-    assert fs_factory.created
-    mirror.cleanup(fs_factory.created[0])  # must not raise
+    # Cleanup remains callable and idempotent on the given clone path.
+    mirror.cleanup(cache_path)  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -240,18 +225,17 @@ def test_clone_auth_failure_is_git_auth_error_with_codeberg_token_advice(
         ),
     )
     runner = _FakeRunner(responses={"clone": clone_err})
-    fs_factory = _FakeTempdirFactory(root=tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=GITHUB_TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
 
     with pytest.raises(GitAuthError) as exc_info:
-        mirror.clone()
+        mirror.clone_into(cache_path)
 
     text = str(exc_info.value)
     assert "CODEBERG_TOKEN" in text, f"expected CODEBERG_TOKEN advice, got:\n{text}"
@@ -265,8 +249,7 @@ def test_clone_auth_failure_is_git_auth_error_with_codeberg_token_advice(
 
     push_calls = [c for c in runner.calls if "push" in c]
     assert not push_calls
-    assert fs_factory.created
-    mirror.cleanup(fs_factory.created[0])
+    mirror.cleanup(cache_path)  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -302,16 +285,15 @@ def test_push_workflow_scope_rejection_is_push_error_with_redaction_and_nonfatal
     ]
     push_err = _make_called_process_error(cmd=push_cmd, stderr=workflow_stderr)
     runner = _FakeRunner(responses={"push": push_err})
-    fs_factory = _FakeTempdirFactory(root=tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=GITHUB_TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
-    local_path = str(tmp_path / "mirror")
+    local_path = cache_path
     caplog.set_level(logging.INFO)
 
     with pytest.raises(GitPushError) as exc_info:
@@ -360,16 +342,15 @@ def test_generic_push_failure_is_git_push_error_not_clone_error(
     ]
     push_err = _make_called_process_error(cmd=push_cmd, stderr=generic_push_stderr)
     runner = _FakeRunner(responses={"push": push_err})
-    fs_factory = _FakeTempdirFactory(root=tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=GITHUB_TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
-    local_path = str(tmp_path / "mirror")
+    local_path = cache_path
 
     with pytest.raises(GitPushError) as exc_info:
         mirror.push_branches(local_path)
@@ -398,7 +379,6 @@ def test_generic_push_failure_is_git_push_error_not_clone_error(
         target_url="https://github.com/owner/target.git",
         github_token=GITHUB_TOKEN_SENTINEL,
         command_runner=runner2,
-        tempdir_factory=fs_factory,
     )
     with pytest.raises(GitPushRejectedError) as exc2:
         mirror2.push_branches(local_path)

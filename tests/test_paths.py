@@ -12,6 +12,8 @@ from pathlib import Path
 
 import platformdirs
 import pytest
+
+import forgejo_to_github.paths as paths_module
 from forgejo_to_github.paths import default_state_base, state_path_for
 
 
@@ -59,3 +61,37 @@ def test_default_state_base_does_not_depend_on_cwd(
     monkeypatch.chdir(tmp_path)
 
     assert default_state_base() == before
+
+
+def test_cache_path_for_namespaces_mirror_by_source_and_target(
+    tmp_path: Path,
+) -> None:
+    """Cache path nests source owner/repo and target owner/repo under base."""
+    assert paths_module.cache_path_for(
+        tmp_path, "codeberg-owner/widgets", "github-owner/widgets"
+    ) == (
+        tmp_path
+        / "codeberg-owner"
+        / "widgets"
+        / "github-owner"
+        / "widgets"
+        / "mirror.git"
+    )
+
+
+def test_default_cache_base_uses_platform_user_cache_dir() -> None:
+    """Default cache base is the platform user cache directory for f2gh."""
+    assert paths_module.default_cache_base() == Path(
+        platformdirs.user_cache_dir("f2gh")
+    )
+
+
+def test_default_cache_base_does_not_depend_on_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default cache base is unchanged when the working directory changes."""
+    before = paths_module.default_cache_base()
+
+    monkeypatch.chdir(tmp_path)
+
+    assert paths_module.default_cache_base() == before

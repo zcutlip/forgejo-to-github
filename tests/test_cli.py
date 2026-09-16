@@ -599,3 +599,152 @@ def test_main_reports_lock_contention_distinctly(
     assert str(state_path) in contention
     assert "nothing was migrated" not in contention
     assert contention != unusable
+
+
+# ---------------------------------------------------------------------------
+# 10. --clean removes the cached git mirror (issue #5)
+# ---------------------------------------------------------------------------
+
+
+def _isolated_user_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Point platform user dirs at tmp_path so --clean never touches home."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+
+def _expected_mirror_dir() -> Path:
+    """The default cached-mirror location for owner/source → owner/target.
+
+    Resolved lazily so tests calling it after ``_isolated_user_dirs``
+    observe the isolated base directories.
+    """
+    import platformdirs
+
+    return (
+        Path(platformdirs.user_cache_dir("f2gh"))
+        / "owner"
+        / "source"
+        / "owner"
+        / "target"
+        / "mirror.git"
+    )
+
+
+def test_parse_args_clean_flag_parses(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--clean parses as a store_true flag alongside source/target."""
+    with patch.object(
+        sys, "argv", ["f2gh", "--source", "owner/source", "--target", "owner/target", "--clean"]
+    ):
+        args = f2gh.parse_args()
+
+    assert args.clean is True
+    capsys.readouterr()
+
+
+def test_main_clean_removes_cached_mirror_and_exits_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--clean deletes this migration's mirror, reports it, needs no tokens."""
+    _isolated_user_dirs(tmp_path, monkeypatch)
+    monkeypatch.delenv("CODEBERG_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    mirror_dir = _expected_mirror_dir()
+    mirror_dir.mkdir(parents=True)
+    (mirror_dir / "HEAD").write_text("ref: refs/heads/main\n")
+
+    with (
+        patch.object(
+            sys,
+            "argv",
+            ["f2gh", "--source", "owner/source", "--target", "owner/target", "--clean"],
+        ),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        f2gh.main()
+
+    assert exc_info.value.code == 0
+    assert not mirror_dir.exists()
+    captured = capsys.readouterr()
+    assert "mirror" in captured.out.lower() or str(mirror_dir) in captured.out
+
+
+def test_main_clean_dry_run_prints_without_deleting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--clean --dry-run reports what it would remove and deletes nothing."""
+    _isolated_user_dirs(tmp_path, monkeypatch)
+    mirror_dir = _expected_mirror_dir()
+    mirror_dir.mkdir(parents=True)
+    (mirror_dir / "HEAD").write_text("ref: refs/heads/main\n")
+
+    with (
+        patch.object(
+            sys,
+            "argv",
+            [
+                "f2gh",
+                "--source",
+                "owner/source",
+                "--target",
+                "owner/target",
+                "--clean",
+                "--dry-run",
+            ],
+        ),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        f2gh.main()
+
+    assert exc_info.value.code == 0
+    assert mirror_dir.exists()
+    captured = capsys.readouterr()
+    assert str(mirror_dir) in captured.out or "mirror" in captured.out.lower()
+
+
+def test_main_clean_refuses_while_state_locked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--clean refuses when another run holds this migration's state lock."""
+    from forgejo_to_github.paths import default_state_base, state_path_for
+    from forgejo_to_github.state import StateStore
+
+    _isolated_user_dirs(tmp_path, monkeypatch)
+    state_path = state_path_for(
+        default_state_base(), "owner/source", "owner/target"
+    )
+    holder = StateStore(state_path, "owner/source", "owner/target")
+    holder.prepare()
+    try:
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "f2gh",
+                    "--source",
+                    "owner/source",
+                    "--target",
+                    "owner/target",
+                    "--clean",
+                ],
+            ),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            f2gh.main()
+    finally:
+        holder.release()
+
+    assert exc_info.value.code == f2gh.EXIT_STATE_ERROR
+    captured = capsys.readouterr()
+    assert captured.err, "expected a refusal message on stderr"

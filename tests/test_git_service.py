@@ -39,6 +39,12 @@
 # The obsolete tag-name redaction test (no longer applicable because tag
 # names are no longer argv) is removed; URL/extraHeader/generic redaction
 # and all error/advice tests are retained.
+#
+# Clone-cache amendment (issue #5, approved RED reopen):
+# ``clone()`` and the ``tempdir_factory`` seam are removed; ``clone_into``
+# takes an explicit caller-owned path. All ``mirror.clone()`` calls now
+# pass ``cache_path`` (``tmp_path / "mirror"``), the tempdir-prefix test is
+# deleted with the seam, and cleanup tests assert the given path is gone.
 """RED-class behavioral tests for the future ``forgejo_to_github.git.GitMirror``.
 
 Tests cover the public behavior described in section 11 of the test-framework
@@ -142,25 +148,6 @@ class _FakeRunner:
         return _FakeCompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
 
-@dataclass
-class _FakeTempdirFactory:
-    """Stand-in for ``tempfile.mkdtemp`` that records every path it creates."""
-
-    root: Any
-    created: list[str] = field(default_factory=list)
-
-    def __call__(self, suffix: str | None = None, prefix: str | None = None) -> str:
-        path = self.root / f"{prefix or 'f2gh'}-{len(self.created)}{suffix or ''}"
-        path.mkdir()
-        self.created.append(str(path))
-        return str(path)
-
-
-def _mkdtemp_under(tmp_path: Any) -> _FakeTempdirFactory:
-    """Return a factory that produces a unique subdir of ``tmp_path``."""
-    return _FakeTempdirFactory(root=tmp_path)
-
-
 def _make_cpe(
     cmd: list[str],
     stderr: str,
@@ -190,19 +177,18 @@ def test_clone_success_returns_local_path_and_records_command(
     records the command (``git clone <url> <path>``) on the fake``.
     """
     runner = _FakeRunner()
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
 
-    local_path = mirror.clone()
+    local_path = mirror.clone_into(cache_path)
 
-    assert local_path == fs_factory.created[0]
+    assert local_path == cache_path
     assert len(runner.calls) == 1
     recorded = runner.calls[0]
     assert "clone" in recorded
@@ -232,18 +218,17 @@ def test_clone_nonzero_exit_raises_structured_git_clone_error(
         returncode=128,
     )
     runner = _FakeRunner(responses={"clone": cpe})
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
 
     with pytest.raises(Exception) as exc_info:
-        mirror.clone()
+        mirror.clone_into(cache_path)
 
     exc = exc_info.value
     # The exception type is allowed to be the module's ``GitCloneError`` or
@@ -283,18 +268,17 @@ def test_clone_auth_failure_is_classified_as_git_auth_error(tmp_path: Any) -> No
         returncode=128,
     )
     runner = _FakeRunner(responses={"clone": cpe})
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
 
     with pytest.raises(Exception) as exc_info:
-        mirror.clone()
+        mirror.clone_into(cache_path)
 
     exc = exc_info.value
     cls_name = type(exc).__name__
@@ -317,18 +301,17 @@ def test_clone_timeout_classified_as_git_clone_timeout_error(
     GitCloneTimeoutError.``
     """
     runner = _FakeRunner(timeout=True)
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
 
     with pytest.raises(Exception) as exc_info:
-        mirror.clone()
+        mirror.clone_into(cache_path)
 
     cls_name = type(exc_info.value).__name__
     assert "GitCloneTimeoutError" in cls_name
@@ -358,18 +341,17 @@ def test_clone_stderr_token_is_redacted_in_error_text(tmp_path: Any) -> None:
         returncode=128,
     )
     runner = _FakeRunner(responses={"clone": cpe})
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
 
     with pytest.raises(Exception) as exc_info:
-        mirror.clone()
+        mirror.clone_into(cache_path)
 
     text = str(exc_info.value)
     assert TOKEN_SENTINEL not in text, (
@@ -402,20 +384,19 @@ def test_branch_push_success_uses_all_and_redacts_token(
     authentication).
     """
     runner = _FakeRunner()
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
 
     # Push phases operate on an independent local path; no real ``git``
     # binary is invoked because the command runner is injected. The path
     # lives under ``tmp_path`` to match the offline test boundary.
-    local_path = str(tmp_path / "mirror")
+    local_path = cache_path
     caplog.set_level(logging.INFO)
     result = mirror.push_branches(local_path)
 
@@ -457,16 +438,15 @@ def test_branch_push_failure_raises_git_push_error(tmp_path: Any) -> None:
         returncode=1,
     )
     runner = _FakeRunner(responses={"push": cpe})
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
-    local_path = str(tmp_path / "mirror")
+    local_path = cache_path
 
     with pytest.raises(Exception) as exc_info:
         mirror.push_branches(local_path)
@@ -509,16 +489,15 @@ def test_branch_push_non_fast_forward_is_classified_with_advice(
         returncode=1,
     )
     runner = _FakeRunner(responses={"push": cpe})
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
-    local_path = str(tmp_path / "mirror")
+    local_path = cache_path
 
     with pytest.raises(Exception) as exc_info:
         mirror.push_branches(local_path)
@@ -555,16 +534,15 @@ def test_tag_push_success_uses_tags_and_redacts_token(
     the token for git's own authentication).
     """
     runner = _FakeRunner()
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
-    local_path = str(tmp_path / "mirror")
+    local_path = cache_path
     caplog.set_level(logging.INFO)
 
     result = mirror.push_tags(local_path)
@@ -606,16 +584,15 @@ def test_tag_push_failure_raises_git_tag_push_error(tmp_path: Any) -> None:
         returncode=1,
     )
     runner = _FakeRunner(responses={"push": cpe})
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
-    local_path = str(tmp_path / "mirror")
+    local_path = cache_path
 
     with pytest.raises(Exception) as exc_info:
         mirror.push_tags(local_path)
@@ -639,16 +616,15 @@ def test_url_token_is_redacted_in_logged_command(tmp_path: Any, caplog: Any) -> 
     placeholder.``
     """
     runner = _FakeRunner()
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
-    local_path = str(tmp_path / "mirror")
+    local_path = cache_path
 
     caplog.set_level(logging.INFO)
 
@@ -692,16 +668,15 @@ def test_extra_header_token_is_redacted_in_command(tmp_path: Any) -> None:
         returncode=1,
     )
     runner = _FakeRunner(responses={"push": cpe})
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
-    local_path = str(tmp_path / "mirror")
+    local_path = cache_path
 
     with pytest.raises(Exception) as exc_info:
         mirror.push_branches(local_path)
@@ -744,18 +719,17 @@ def test_clone_failure_advice_has_cause_remediation_and_docs_pointer(
         returncode=128,
     )
     runner = _FakeRunner(responses={"clone": cpe})
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
 
     with pytest.raises(Exception) as exc_info:
-        mirror.clone()
+        mirror.clone_into(cache_path)
 
     text = str(exc_info.value)
     # (a) most likely cause: "network" / "DNS" / "host"
@@ -804,16 +778,15 @@ def test_tag_push_failure_advice_references_tag_and_retry(tmp_path: Any) -> None
         returncode=1,
     )
     runner = _FakeRunner(responses={"push": cpe})
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
-    local_path = str(tmp_path / "mirror")
+    local_path = cache_path
 
     with pytest.raises(Exception) as exc_info:
         mirror.push_tags(local_path)
@@ -849,16 +822,15 @@ def test_non_fast_forward_advice_recommends_rebase_or_force_with_lease(
         returncode=1,
     )
     runner = _FakeRunner(responses={"push": cpe})
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
-    local_path = str(tmp_path / "mirror")
+    local_path = cache_path
 
     with pytest.raises(Exception) as exc_info:
         mirror.push_branches(local_path)
@@ -900,18 +872,17 @@ def test_clone_failure_is_terminal_no_github_api_call_after(
         returncode=128,
     )
     runner = _FakeRunner(responses={"clone": cpe})
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
 
     with pytest.raises(GitCloneError):
-        mirror.clone()
+        mirror.clone_into(cache_path)
 
     # Only the clone call is allowed; no push-shaped call is permitted.
     push_calls = [c for c in runner.calls if "push" in c]
@@ -948,16 +919,15 @@ def test_branch_push_failure_is_nonfatal_does_not_abort(tmp_path: Any) -> None:
         returncode=1,
     )
     runner = _FakeRunner(responses={"push": cpe})
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
-    local_path = str(tmp_path / "mirror")
+    local_path = cache_path
 
     with pytest.raises(Exception) as exc_info:
         mirror.push_branches(local_path)
@@ -992,16 +962,15 @@ def test_tag_push_failure_is_nonfatal_for_issue_migration(tmp_path: Any) -> None
         returncode=1,
     )
     runner = _FakeRunner(responses={"push": cpe})
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
-    local_path = str(tmp_path / "mirror")
+    local_path = cache_path
 
     with pytest.raises(Exception) as exc_info:
         mirror.push_tags(local_path)
@@ -1016,41 +985,14 @@ def test_tag_push_failure_is_nonfatal_for_issue_migration(tmp_path: Any) -> None
 # Tempdir prefix suffix handling (append-only)
 
 
-def test_git_mirror_tempdir_prefix_uses_removesuffix_not_rstrip(
-    tmp_path: Any,
-) -> None:
-    """``tagging.git`` must yield the ``tagging`` slug, not an over-stripped one.
-
-    ``str.rstrip(".git")`` strips the character set ``{'.', 'g', 'i', 't'}``,
-    so ``tagging.git`` mangles to ``taggin``. The prefix must strip only the
-    ``.git`` suffix.
-    """
-    runner = _FakeRunner()
-    fs_factory = _mkdtemp_under(tmp_path)
-
-    mirror = GitMirror(
-        source_url="https://codeberg.org/owner/tagging.git",
-        target_url="https://github.com/owner/tagging.git",
-        github_token=TOKEN_SENTINEL,
-        command_runner=runner,
-        tempdir_factory=fs_factory,
-    )
-
-    actual = mirror._tempdir_prefix()
-    assert actual == "f2gh-tagging-", (
-        f"expected slug 'tagging' (prefix 'f2gh-tagging-') vs mangled actual "
-        f"{actual!r} (rstrip char-set over-strip of 'tagging.git' -> 'taggin')"
-    )
-
-
 # ---------------------------------------------------------------------------
-# Clone tempdir cleanup on failure
+# Clone path cleanup on failure
 # ---------------------------------------------------------------------------
 
 
-def test_clone_failure_removes_tempdir_before_raising(tmp_path: Any) -> None:
+def test_clone_failure_removes_clone_path_before_raising(tmp_path: Any) -> None:
     """A clone that exits non-zero raises a ``GitCloneError``-shaped
-    exception and removes the tempdir it created, so no orphaned clone
+    exception and removes the given clone path, so no orphaned clone
     directory is left behind on the failure path.
     """
     cpe = _make_cpe(
@@ -1068,68 +1010,62 @@ def test_clone_failure_removes_tempdir_before_raising(tmp_path: Any) -> None:
         returncode=128,
     )
     runner = _FakeRunner(responses={"clone": cpe})
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
 
     with pytest.raises(Exception) as exc_info:
-        mirror.clone()
+        mirror.clone_into(cache_path)
 
     assert "GitCloneError" in type(exc_info.value).__name__
-    assert fs_factory.created
-    assert all(not Path(p).exists() for p in fs_factory.created)
+    assert not Path(cache_path).exists()
 
 
-def test_clone_keyboard_interrupt_removes_tempdir_and_reraises(
+def test_clone_keyboard_interrupt_removes_clone_path_and_reraises(
     tmp_path: Any,
 ) -> None:
     """A clone interrupted by ``KeyboardInterrupt`` re-raises the
-    interrupt and removes the tempdir it created, so no orphaned clone
+    interrupt and removes the given clone path, so no orphaned clone
     directory survives an aborted clone.
     """
     runner = _FakeRunner(responses={"clone": KeyboardInterrupt()})
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
 
     with pytest.raises(KeyboardInterrupt):
-        mirror.clone()
+        mirror.clone_into(cache_path)
 
-    assert fs_factory.created
-    assert all(not Path(p).exists() for p in fs_factory.created)
+    assert not Path(cache_path).exists()
 
 
-def test_clone_timeout_removes_tempdir_before_raising(tmp_path: Any) -> None:
+def test_clone_timeout_removes_clone_path_before_raising(tmp_path: Any) -> None:
     """A clone that times out raises a timeout-shaped ``GitCloneError``
-    and removes the tempdir it created, so no orphaned clone directory is
+    and removes the given clone path, so no orphaned clone directory is
     left behind on the timeout path.
     """
     runner = _FakeRunner(timeout=True)
-    fs_factory = _mkdtemp_under(tmp_path)
+    cache_path = str(tmp_path / "mirror")
 
     mirror = GitMirror(
         source_url="https://codeberg.org/owner/repo.git",
         target_url="https://github.com/owner/target.git",
         github_token=TOKEN_SENTINEL,
         command_runner=runner,
-        tempdir_factory=fs_factory,
     )
 
     with pytest.raises(Exception) as exc_info:
-        mirror.clone()
+        mirror.clone_into(cache_path)
 
     assert "Timeout" in type(exc_info.value).__name__
-    assert fs_factory.created
-    assert all(not Path(p).exists() for p in fs_factory.created)
+    assert not Path(cache_path).exists()
