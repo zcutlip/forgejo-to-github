@@ -95,7 +95,6 @@ def _make_mirror(runner: _ScriptedRunner) -> GitMirror:
         target_url=TARGET_URL,
         github_token="not-a-real-token",
         command_runner=runner,
-        cleanup=lambda path: None,
     )
 
 
@@ -395,7 +394,8 @@ def test_resume_with_valid_cache_skips_clone(tmp_path: Any) -> None:
     push_argvs = [argv for argv in runner.calls if "push" in argv]
     assert any("--all" in argv for argv in push_argvs)
     assert any("--tags" in argv for argv in push_argvs)
-    assert cleanups == []
+    # Success deletes the cache: the resumed push completed the migration.
+    assert cleanups == [cache_path]
     assert result.failures == []
 
 
@@ -409,7 +409,8 @@ def test_resume_with_invalid_cache_removes_it_then_reclones(
 
     _run_orchestrator(git=git, state=state, mirror_path=cache_path)
 
-    assert git.cleanup_calls == [cache_path]
+    # Evict-before-reclone plus delete-on-success: both flow through cleanup.
+    assert git.cleanup_calls == [cache_path, cache_path]
     assert git.clone_into_calls == [cache_path]
 
 
@@ -422,7 +423,10 @@ def test_push_failure_keeps_cache_for_retry(tmp_path: Any) -> None:
     result, _ = _run_orchestrator(git=git, state=state, mirror_path=cache_path)
 
     assert result.git["push"] == "failed"
-    assert git.cleanup_calls == []
+    # Exactly one cleanup call — the pre-clone evict (the seam is
+    # idempotent over a missing path). No success-delete follows a
+    # failed push: the cache is kept for retry.
+    assert git.cleanup_calls == [cache_path]
     assert any(
         save.get("clone_path") == cache_path and save.get("git_pushed") is False
         for save in state.saves
