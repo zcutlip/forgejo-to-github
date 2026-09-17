@@ -163,7 +163,9 @@ def test_round_trip_restores_int_keys(tmp_path):
     assert reloaded["git_pushed"] is True
     assert reloaded["migrated"] == {3: 30, 9: 90}
     # Be explicit: keys are ints, not strings, after the round trip.
-    for key in reloaded["migrated"]:
+    migrated = reloaded["migrated"]
+    assert isinstance(migrated, dict)
+    for key in migrated:
         assert isinstance(key, int), f"key {key!r} should be int, got {type(key)}"
 
 
