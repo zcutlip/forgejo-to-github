@@ -220,8 +220,7 @@ class StateStore:
 
         Returns a plain ``dict`` with the keys ``source``, ``target``,
         ``repo_created``, ``git_pushed``, ``migrated``, and ``clone_path``.
-        ``migrated``
-        is ``dict[int, int]`` (Codeberg number → GitHub number), the
+        ``migrated`` is ``dict[int, int]`` (Codeberg number → GitHub number), the
         same shape the legacy ``f2gh.load_state`` returns. The dataclass
         :class:`MigrationState` is the typed value object used by later
         stages; this method returns the dict form for backward
