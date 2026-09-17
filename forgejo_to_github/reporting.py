@@ -113,7 +113,14 @@ class Reporter:
         self._output.write(f"SKIP CB #{source_number}: already migrated")
 
     def git_phase_finished(self, status: str) -> None:
-        """Emit a one-line summary of the Git phase."""
+        """Emit a one-line Git phase event.
+
+        ``status`` is rendered verbatim after the ``"Git: "`` prefix:
+        ``"ok"`` / ``"failed"`` summarize the phase, while progress
+        events (clone started/completed, cache reuse/removal) arrive
+        as longer free-form strings through the same seam so no new
+        reporter method is needed.
+        """
         line = f"Git: {status}"
         if status == "failed":
             self._error.write(line)
