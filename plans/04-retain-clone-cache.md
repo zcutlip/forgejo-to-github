@@ -52,8 +52,9 @@ cache, rooted at `platformdirs.user_cache_dir("f2gh")`.
    mirror is a frozen snapshot, deterministic). Invalid or missing cache
    → fresh clone (fallback, never a hard error): an invalid cached mirror
    is removed via the injected `cleanup` seam — scoped strictly to the
-   resolved cache path — before re-clone. If removal itself fails, that
-   is a hard error.
+   resolved cache path — before re-clone. Eviction is best-effort (the
+   cleanup seam never raises); a failed eviction surfaces as a terminal
+   clone error.
 4. **Checkpoint immediately after clone.** The `clone_path` is persisted
    through the state seam right after a successful clone, before any push.
    A write failure aborts the run (exit 3, per #15) — never swallowed.
