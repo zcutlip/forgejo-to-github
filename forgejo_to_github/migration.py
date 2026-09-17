@@ -544,6 +544,9 @@ class MigrationOrchestrator:
             mirror_path = self._resolve_mirror_path()
             if self._cache_is_reusable(mirror_path):
                 local_path = mirror_path
+                self._safe_git_phase_finished(
+                    f"reusing cached mirror: {mirror_path}"
+                )
             else:
                 # Invalid or missing cache: remove it via the cleanup
                 # seam (scoped to the resolved cache path) before the
@@ -555,8 +558,13 @@ class MigrationOrchestrator:
                     evict_fn(mirror_path)
                 # Clone is terminal. Any raise propagates out of ``run``
                 # and the result is never returned to the caller for this run.
+                self._safe_git_phase_finished(
+                    f"cloning {getattr(self.repo, 'source', '')}"
+                    f" into {mirror_path}"
+                )
                 local_path = str(clone_into_fn(mirror_path))
                 self._checkpoint_clone_path(local_path)
+                self._safe_git_phase_finished(f"clone complete: {local_path}")
                 result.git["clone"] = "ok"
                 result.clone_status = "ok"
 
@@ -592,6 +600,9 @@ class MigrationOrchestrator:
                 if callable(cleanup_fn):
                     with contextlib.suppress(Exception):
                         cleanup_fn(local_path)
+                    self._safe_git_phase_finished(
+                        f"removed cached mirror: {local_path}"
+                    )
             return
 
         # Legacy fallback for tests/test_orchestration.py _FakeGit
