@@ -236,7 +236,7 @@ class _FakeReport:
     """
 
     def __init__(self) -> None:
-        self.events: list[tuple[str, ...]] = []
+        self.events: list[tuple[Any, ...]] = []
 
     def issue_started(self, source_number: int) -> None:
         self.events.append(("issue_started", str(source_number)))
@@ -288,7 +288,7 @@ def _build(
     Returns the orchestrator together with the dictionary of fakes so
     that each test can poke at the right seam.
     """
-    repo = _FakeRepo("owner/source", "owner/target")
+    repo: Any = _FakeRepo("owner/source", "owner/target")
     api = api if api is not None else _FakeApi(issues)
     git = git if git is not None else _FakeGit()
     state = state if state is not None else _FakeState()
@@ -729,6 +729,7 @@ class _SaveSpyStateStore(StateStore):
         repo_created: bool,
         git_pushed: bool,
         migrated: dict[int, int],
+        clone_path: str | None = None,
     ) -> None:
         self.save_calls.append((bool(repo_created), bool(git_pushed), len(migrated)))
         # Spy only: record and delegate nothing — a dry run must never
@@ -2142,9 +2143,10 @@ class _PersistingSpyStateStore(StateStore):
         repo_created: bool,
         git_pushed: bool,
         migrated: dict[int, int],
+        clone_path: str | None = None,
     ) -> None:
         self.save_calls.append((bool(repo_created), bool(git_pushed), dict(migrated)))
-        super().save(repo_created, git_pushed, migrated)
+        super().save(repo_created, git_pushed, migrated, clone_path=clone_path)
 
 
 class _FlakySaveStore(_PersistingSpyStateStore):
@@ -2159,10 +2161,11 @@ class _FlakySaveStore(_PersistingSpyStateStore):
         repo_created: bool,
         git_pushed: bool,
         migrated: dict[int, int],
+        clone_path: str | None = None,
     ) -> None:
         if self.fail_saves:
             raise StateWriteError(self._state_path, "simulated save failure")
-        super().save(repo_created, git_pushed, migrated)
+        super().save(repo_created, git_pushed, migrated, clone_path=clone_path)
 
 
 def test_issues_attempted_excludes_resumed_issues() -> None:
@@ -2497,10 +2500,11 @@ class _ArmAfterFirstSaveStore(_PersistingSpyStateStore):
         repo_created: bool,
         git_pushed: bool,
         migrated: dict[int, int],
+        clone_path: str | None = None,
     ) -> None:
         if self.save_calls:
             raise StateWriteError(self._state_path, "simulated save failure")
-        super().save(repo_created, git_pushed, migrated)
+        super().save(repo_created, git_pushed, migrated, clone_path=clone_path)
 
 
 def test_state_write_error_propagates_from_the_push_checkpoint(tmp_path: Path) -> None:
