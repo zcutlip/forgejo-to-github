@@ -547,8 +547,9 @@ class MigrationOrchestrator:
             else:
                 # Invalid or missing cache: remove it via the cleanup
                 # seam (scoped to the resolved cache path) before the
-                # fresh clone. A removal failure is a hard error and
-                # propagates; a clone failure stays terminal.
+                # fresh clone. Eviction is best-effort (the seam never
+                # raises); a failed eviction surfaces as a terminal
+                # clone failure. Clone failure stays terminal.
                 evict_fn = getattr(self.git, "cleanup", None)
                 if callable(evict_fn):
                     evict_fn(mirror_path)
