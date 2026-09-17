@@ -108,6 +108,7 @@ class _CacheFakeGit:
         self.clone_into_calls: list[str] = []
         self.push_calls: list[tuple[str, str]] = []
         self.cleanup_calls: list[str] = []
+        self.events: list[tuple[str, str]] = []
 
     def cached_mirror_is_valid(self, path: str) -> bool:
         self.validity_checks.append(path)
@@ -115,20 +116,24 @@ class _CacheFakeGit:
 
     def clone_into(self, path: str) -> str:
         self.clone_into_calls.append(path)
+        self.events.append(("clone_into", path))
         return path
 
     def push_branches(self, local_path: str) -> None:
         self.push_calls.append(("branches", local_path))
+        self.events.append(("push_branches", local_path))
         if self.fail_push:
             raise RuntimeError("branch push failed")
 
     def push_tags(self, local_path: str) -> None:
         self.push_calls.append(("tags", local_path))
+        self.events.append(("push_tags", local_path))
         if self.fail_push:
             raise RuntimeError("tag push failed")
 
     def cleanup(self, local_path: str) -> None:
         self.cleanup_calls.append(local_path)
+        self.events.append(("cleanup", local_path))
 
 
 class _CacheFakeState:
@@ -180,13 +185,15 @@ def _fresh_loaded(clone_path: Any = None) -> dict[str, Any]:
 
 
 def _make_repo(mirror_path: Any) -> Any:
-    return SimpleNamespace(
+    from forgejo_to_github.domain import Repository
+
+    return Repository(
         source="owner/source",
         target="owner/target",
-        mirror_path=mirror_path,
         dry_run=False,
         skip_git=False,
         yes=True,
+        mirror_path=mirror_path,
     )
 
 
@@ -395,7 +402,10 @@ def test_resume_with_valid_cache_skips_clone(tmp_path: Any) -> None:
     assert any("--all" in argv for argv in push_argvs)
     assert any("--tags" in argv for argv in push_argvs)
     # Success deletes the cache: the resumed push completed the migration.
+    # Nothing was cloned on this run, so the clone status stays "skipped".
     assert cleanups == [cache_path]
+    assert result.git["clone"] == "skipped"
+    assert result.clone_status == "skipped"
     assert result.failures == []
 
 
@@ -409,8 +419,16 @@ def test_resume_with_invalid_cache_removes_it_then_reclones(
 
     _run_orchestrator(git=git, state=state, mirror_path=cache_path)
 
-    # Evict-before-reclone plus delete-on-success: both flow through cleanup.
-    assert git.cleanup_calls == [cache_path, cache_path]
+    # Evict-before-reclone plus delete-on-success: the combined event log
+    # locks the temporal order the per-seam lists cannot express — evict,
+    # clone, branch push, tag push, success-delete.
+    assert git.events == [
+        ("cleanup", cache_path),
+        ("clone_into", cache_path),
+        ("push_branches", cache_path),
+        ("push_tags", cache_path),
+        ("cleanup", cache_path),
+    ]
     assert git.clone_into_calls == [cache_path]
 
 
@@ -446,7 +464,9 @@ def test_git_phase_derives_default_cache_path_when_repo_has_none(
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     git = _CacheFakeGit(valid=False)
     state = _CacheFakeState(_fresh_loaded())
-    repo = SimpleNamespace(
+    from forgejo_to_github.domain import Repository
+
+    repo = Repository(
         source="owner/source",
         target="owner/target",
         dry_run=False,
