@@ -13,8 +13,10 @@ Design notes
   push URL. There is no module-level state and no I/O at import time:
   the defaults are bound at instance time, not at module load time.
 * Every collaborator is injectable. Tests can pass fakes for the
-  subprocess boundary (``command_runner``), the filesystem boundary
-  (``tempdir_factory``), and the cleanup boundary (``cleanup``).
+  subprocess boundary (``command_runner``) and the cleanup boundary
+  (``cleanup``). Cache validation reads the filesystem directly
+  (``os.path.isdir``) only for the missing-path short-circuit, so a
+  missing cache never spawns a subprocess.
 * The class never spawns a real subprocess or touches the filesystem
   except through the injected callables. Importing this module does no
   work.
@@ -40,9 +42,9 @@ network I/O at module load time and spawns no subprocesses.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
-import tempfile
 from collections.abc import Callable
 from typing import Any
 
@@ -233,11 +235,6 @@ def _default_cleanup(path: str, *args: Any, **kwargs: Any) -> None:
     directory that may or may not exist without raising.
     """
     shutil.rmtree(path, ignore_errors=True)
-
-
-def _default_tempdir_factory(prefix: str | None = None, **kwargs: Any) -> str:
-    """Default tempdir factory that delegates to ``tempfile.mkdtemp``."""
-    return tempfile.mkdtemp(prefix=prefix, **kwargs)
 
 
 def _argv_as_string(cmd: list[str] | tuple[str, ...] | str | None) -> str:
@@ -432,9 +429,6 @@ class GitMirror:
         Callable matching :func:`subprocess.run`'s positional/keyword
         shape. Defaults to a thin wrapper that returns the
         ``CompletedProcess`` or raises ``CalledProcessError``.
-    tempdir_factory:
-        Callable matching :func:`tempfile.mkdtemp`'s keyword shape.
-        Defaults to :func:`tempfile.mkdtemp` bound at instance time.
     cleanup:
         Callable matching :func:`shutil.rmtree`'s shape with
         ``ignore_errors=True``. Defaults to
@@ -449,11 +443,14 @@ class GitMirror:
 
     Public methods follow the spec:
 
-    * :meth:`clone` returns the local path (str).
+    * :meth:`clone_into` clones into a caller-owned path and returns
+      it (str).
+    * :meth:`cached_mirror_is_valid` reports whether a cached mirror
+      is reusable.
     * :meth:`push_branches` and :meth:`push_tags` accept a single
       ``local_path`` argument and return ``None``. The token and any
       ref/tag selection are owned by the instance.
-    * :meth:`cleanup` removes the tempdir via the injected
+    * :meth:`cleanup` removes a clone directory via the injected
       ``cleanup`` callable.
     """
 
@@ -463,7 +460,6 @@ class GitMirror:
         target_url: str,
         github_token: str,
         command_runner: Callable[..., Any] | None = None,
-        tempdir_factory: Callable[..., str] | None = None,
         cleanup: Callable[..., None] | None = None,
     ) -> None:
         self._source_url: str = source_url
@@ -472,9 +468,6 @@ class GitMirror:
 
         self._command_runner: Callable[..., Any] = (
             command_runner if command_runner is not None else _default_command_runner
-        )
-        self._tempdir_factory: Callable[..., str] = (
-            tempdir_factory if tempdir_factory is not None else _default_tempdir_factory
         )
         self._cleanup: Callable[..., None] = (
             cleanup if cleanup is not None else _default_cleanup
@@ -494,13 +487,12 @@ class GitMirror:
 
     # --- public API ---------------------------------------------------------
 
-    def clone(self) -> str:
-        """Clone ``source_url`` into a new tempdir using ``git --mirror``.
+    def clone_into(self, path: str) -> str:
+        """Clone ``source_url`` into the given path using ``git --mirror``.
 
-        The tempdir is created via the injected ``tempdir_factory``
-        with a prefix derived from the second component of the target
-        slug (e.g. ``widgets`` from ``owner/widgets``). The returned
-        path is the value the factory produced.
+        ``path`` is caller-owned (typically the per-migration cache
+        location resolved by the CLI). The method returns ``path`` on
+        success.
 
         On ``subprocess.TimeoutExpired``, raises
         :class:`GitCloneTimeoutError`. On ``CalledProcessError``,
@@ -509,12 +501,12 @@ class GitMirror:
         any attached command-line text are run through
         :func:`redact_token` so the GitHub token never leaks.
 
-        On success the tempdir is returned and remains the caller's
+        On success the path is returned and remains the caller's
         responsibility to clean up via :meth:`cleanup`. On any failure
-        (timeout, non-zero exit, or interrupt), ``clone`` removes the
-        tempdir before the exception propagates.
+        (timeout, non-zero exit, or interrupt), ``clone_into`` removes
+        the partial path before the exception propagates.
         """
-        local_path = self._tempdir_factory(prefix=self._tempdir_prefix())
+        local_path = path
         argv = ["git", "clone", "--mirror", self._source_url, local_path]
         success = False
         try:
@@ -567,6 +559,39 @@ class GitMirror:
         finally:
             if not success:
                 self.cleanup(local_path)
+
+    def cached_mirror_is_valid(self, path: str) -> bool:
+        """Report whether ``path`` holds a reusable cached mirror.
+
+        Returns ``True`` only when the directory exists, it is a bare
+        repository (``git rev-parse --is-bare-repository`` prints
+        ``true``), and its ``remote.origin.url`` exactly matches the
+        live :attr:`source_url`. Any failure — missing path, failing
+        validation command, non-bare repository, origin mismatch —
+        returns ``False`` (the safe direction: the caller falls back
+        to a fresh clone). A missing path short-circuits before any
+        subprocess is spawned. ``KeyboardInterrupt`` is never
+        swallowed.
+        """
+        if not os.path.isdir(path):
+            return False
+        try:
+            bare = self._run(
+                ["git", "-C", path, "rev-parse", "--is-bare-repository"]
+            )
+            if str(getattr(bare, "stdout", "") or "").strip() != "true":
+                return False
+            origin = self._run(
+                ["git", "-C", path, "config", "--get", "remote.origin.url"]
+            )
+            return (
+                str(getattr(origin, "stdout", "") or "").strip()
+                == self._source_url
+            )
+        except KeyboardInterrupt:
+            raise
+        except Exception:  # noqa: BLE001 — any validation failure means "invalid"
+            return False
 
     def push_branches(self, local_path: str) -> None:
         """Push all branches in one command.
@@ -641,7 +666,7 @@ class GitMirror:
             ) from exc
 
     def cleanup(self, local_path: str) -> None:
-        """Remove the tempdir using the injected ``cleanup`` callable.
+        """Remove a clone directory using the injected ``cleanup`` callable.
 
         Idempotent: the default callable (``shutil.rmtree`` with
         ``ignore_errors=True``) does not raise when the directory does
@@ -682,19 +707,6 @@ class GitMirror:
             return f"{scheme}://x-access-token:{token}@{rest}"
         # Non-http(s) URLs (e.g. SSH) are out of scope; surface as-is.
         return target
-
-    def _tempdir_prefix(self) -> str:
-        """Return the tempdir prefix derived from the target slug.
-
-        The prefix is ``f"f2gh-<repo>-"`` where ``<repo>`` is the
-        second component of the target slug (e.g. ``widgets`` from
-        ``owner/widgets``). For malformed target slugs, the prefix
-        falls back to ``"f2gh-"``.
-        """
-        slug = self._target_url.rstrip("/").removesuffix(".git").rsplit("/", 1)[-1]
-        if "/" in self._target_url and slug:
-            return f"f2gh-{slug}-"
-        return "f2gh-"
 
     def _run(self, argv: list[str]) -> Any:
         """Invoke the injected ``command_runner`` with redaction applied.

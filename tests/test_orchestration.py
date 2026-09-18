@@ -236,7 +236,7 @@ class _FakeReport:
     """
 
     def __init__(self) -> None:
-        self.events: list[tuple[str, ...]] = []
+        self.events: list[tuple[Any, ...]] = []
 
     def issue_started(self, source_number: int) -> None:
         self.events.append(("issue_started", str(source_number)))
@@ -288,7 +288,7 @@ def _build(
     Returns the orchestrator together with the dictionary of fakes so
     that each test can poke at the right seam.
     """
-    repo = _FakeRepo("owner/source", "owner/target")
+    repo: Any = _FakeRepo("owner/source", "owner/target")
     api = api if api is not None else _FakeApi(issues)
     git = git if git is not None else _FakeGit()
     state = state if state is not None else _FakeState()
@@ -683,16 +683,11 @@ def test_dry_run_makes_no_subprocess_calls() -> None:
         commands.append(list(argv))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    def fake_tempdir(prefix: str | None = None, **kwargs: Any) -> str:
-        # Recording-only: never creates a real directory.
-        return "/nonexistent-fake-tempdir"
-
     git_mirror = GitMirror(
         source_url="https://codeberg.org/owner/source.git",
         target_url="https://github.com/owner/target.git",
         github_token="not-a-real-token",
         command_runner=recording_runner,
-        tempdir_factory=fake_tempdir,
         cleanup=lambda path: None,
     )
     transport = _ScriptedDiscoveryTransport(issues=[_issue(1)])
@@ -734,6 +729,7 @@ class _SaveSpyStateStore(StateStore):
         repo_created: bool,
         git_pushed: bool,
         migrated: dict[int, int],
+        clone_path: str | None = None,
     ) -> None:
         self.save_calls.append((bool(repo_created), bool(git_pushed), len(migrated)))
         # Spy only: record and delegate nothing — a dry run must never
@@ -1638,9 +1634,9 @@ def test_orchestrator_runs_preflight_before_git_phase() -> None:
     codeberg.list_issues = ordered_list  # type: ignore[method-assign]
 
     class _OrderedGit:
-        def clone(self) -> str:
-            order.append("git.clone")
-            return "/tmp/fake-clone"
+        def clone_into(self, local_path: str) -> str:
+            order.append("git.clone_into")
+            return local_path
 
         def push_branches(self, local_path: str) -> None:
             pass
@@ -1668,7 +1664,7 @@ def test_orchestrator_runs_preflight_before_git_phase() -> None:
     assert order == [
         "check_repository_exists",
         "create_repository",
-        "git.clone",
+        "git.clone_into",
         "list_issues",
     ], (
         "preflight must run before git clone, which must run before "
@@ -2147,9 +2143,10 @@ class _PersistingSpyStateStore(StateStore):
         repo_created: bool,
         git_pushed: bool,
         migrated: dict[int, int],
+        clone_path: str | None = None,
     ) -> None:
         self.save_calls.append((bool(repo_created), bool(git_pushed), dict(migrated)))
-        super().save(repo_created, git_pushed, migrated)
+        super().save(repo_created, git_pushed, migrated, clone_path=clone_path)
 
 
 class _FlakySaveStore(_PersistingSpyStateStore):
@@ -2164,10 +2161,11 @@ class _FlakySaveStore(_PersistingSpyStateStore):
         repo_created: bool,
         git_pushed: bool,
         migrated: dict[int, int],
+        clone_path: str | None = None,
     ) -> None:
         if self.fail_saves:
             raise StateWriteError(self._state_path, "simulated save failure")
-        super().save(repo_created, git_pushed, migrated)
+        super().save(repo_created, git_pushed, migrated, clone_path=clone_path)
 
 
 def test_issues_attempted_excludes_resumed_issues() -> None:
@@ -2502,10 +2500,11 @@ class _ArmAfterFirstSaveStore(_PersistingSpyStateStore):
         repo_created: bool,
         git_pushed: bool,
         migrated: dict[int, int],
+        clone_path: str | None = None,
     ) -> None:
         if self.save_calls:
             raise StateWriteError(self._state_path, "simulated save failure")
-        super().save(repo_created, git_pushed, migrated)
+        super().save(repo_created, git_pushed, migrated, clone_path=clone_path)
 
 
 def test_state_write_error_propagates_from_the_push_checkpoint(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -14,7 +15,12 @@ from forgejo_to_github.domain import Repository
 from forgejo_to_github.git import GitMirror
 from forgejo_to_github.github import GitHubClient
 from forgejo_to_github.migration import MigrationOrchestrator
-from forgejo_to_github.paths import default_state_base, state_path_for
+from forgejo_to_github.paths import (
+    cache_path_for,
+    default_cache_base,
+    default_state_base,
+    state_path_for,
+)
 from forgejo_to_github.reporting import Reporter
 from forgejo_to_github.state import (
     StateLockedError,
@@ -81,6 +87,11 @@ def parse_args() -> argparse.Namespace:
         help="Path to the migration state file (default: per-migration location under the platform user-state directory)",
     )
     parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Remove this migration's cached git mirror and exit (no migration run)",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=__version__,
@@ -143,6 +154,55 @@ def _resolve_state_path(args: argparse.Namespace) -> Path:
     _split_owner_repo("source", source)
     _split_owner_repo("target", target)
     return state_path_for(default_state_base(), source, target)
+
+
+def _resolve_mirror_path(args: argparse.Namespace) -> Path:
+    """Resolve the cached git mirror path for this run.
+
+    The mirror lives under the platform user-cache directory,
+    namespaced per source→target migration — the same layout helper
+    as the state path, rooted at the cache base instead. ``source`` /
+    ``target`` are validated before a path is derived.
+    """
+    source = str(getattr(args, "source", ""))
+    target = str(getattr(args, "target", ""))
+    _split_owner_repo("source", source)
+    _split_owner_repo("target", target)
+    return cache_path_for(default_cache_base(), source, target)
+
+
+def _run_clean(args: argparse.Namespace, state_path: Path) -> int:
+    """Remove this migration's cached mirror and exit without migrating.
+
+    Needs no tokens and performs no network I/O: the state path only
+    supplies the run lock, so ``--clean`` refuses (via the existing
+    lock handler) while another run holds this migration. Under
+    ``--dry-run`` the mirror is reported but never deleted.
+    """
+    source = str(getattr(args, "source", ""))
+    target = str(getattr(args, "target", ""))
+    mirror_path = _resolve_mirror_path(args)
+    if bool(getattr(args, "dry_run", False)):
+        print(f"Would remove cached mirror: {mirror_path}")
+        return 0
+    store = StateStore(state_path, source, target)
+    # Non-blocking acquire through the existing machinery: raises
+    # StateLockedError while another run holds this migration (handled
+    # by main's lock handler) and StateWriteError when the path is
+    # unusable (handled by main's state-error handler).
+    store.prepare()
+    try:
+        if mirror_path.is_dir() and not mirror_path.is_symlink():
+            shutil.rmtree(mirror_path)
+            print(f"Removed cached mirror: {mirror_path}")
+        elif mirror_path.is_symlink() or mirror_path.is_file():
+            mirror_path.unlink()
+            print(f"Removed cached mirror: {mirror_path}")
+        else:
+            print(f"No cached mirror for {source} -> {target}: {mirror_path}")
+        return 0
+    finally:
+        store.release()
 
 
 def _build_orchestrator(args: argparse.Namespace) -> MigrationOrchestrator:
@@ -221,6 +281,7 @@ def _build_orchestrator(args: argparse.Namespace) -> MigrationOrchestrator:
         skip_git=bool(getattr(args, "skip_git", False)),
         dry_run=bool(getattr(args, "dry_run", False)),
         yes=bool(getattr(args, "yes", False)),
+        mirror_path=str(_resolve_mirror_path(args)),
     )
 
     orchestrator = MigrationOrchestrator(
@@ -239,6 +300,8 @@ def main() -> None:
     args = parse_args()
     state_path = _resolve_state_path(args)
     try:
+        if bool(getattr(args, "clean", False)):
+            sys.exit(_run_clean(args, state_path))
         orchestrator = _build_orchestrator(args)
         result = orchestrator.run()
         # Reporter is owned by the orchestrator; render final summary via it.

@@ -45,7 +45,7 @@ from filelock import FileLock, Timeout
 # triggers a ``StateLoadError``. This set is part of the public contract;
 # adding a new key is an explicit change to the format.
 ACCEPTED_KEYS: frozenset[str] = frozenset(
-    {"source", "target", "migrated", "repo_created", "git_pushed", "version"}
+    {"source", "target", "migrated", "repo_created", "git_pushed", "version", "clone_path"}
 )
 
 # Current state-file schema version. Files without a ``"version"`` key
@@ -219,8 +219,8 @@ class StateStore:
         """Load the state file, applying identity and schema validation.
 
         Returns a plain ``dict`` with the keys ``source``, ``target``,
-        ``repo_created``, ``git_pushed``, and ``migrated``. ``migrated``
-        is ``dict[int, int]`` (Codeberg number → GitHub number), the
+        ``repo_created``, ``git_pushed``, ``migrated``, and ``clone_path``.
+        ``migrated`` is ``dict[int, int]`` (Codeberg number → GitHub number), the
         same shape the legacy ``f2gh.load_state`` returns. The dataclass
         :class:`MigrationState` is the typed value object used by later
         stages; this method returns the dict form for backward
@@ -324,12 +324,20 @@ class StateStore:
                 ) from exc
             migrated[int_key] = value
 
+        raw_clone_path = payload.get("clone_path", None)
+        if raw_clone_path is not None and not isinstance(raw_clone_path, str):
+            raise StateLoadError(
+                self._state_path,
+                "state file 'clone_path' must be a string",
+            )
+
         return {
             "source": self._source,
             "target": self._target,
             "repo_created": bool(payload.get("repo_created", False)),
             "git_pushed": bool(payload.get("git_pushed", False)),
             "migrated": migrated,
+            "clone_path": raw_clone_path,
         }
 
     def save(
@@ -337,6 +345,7 @@ class StateStore:
         repo_created: bool,
         git_pushed: bool,
         migrated: dict[int, int],
+        clone_path: str | None = None,
     ) -> None:
         """Persist the migration checkpoint atomically.
 
@@ -349,6 +358,11 @@ class StateStore:
             Whether the Git mirror was pushed successfully.
         migrated:
             Mapping of Codeberg issue numbers to GitHub issue numbers.
+        clone_path:
+            Location of the cached git mirror checkpointed after a
+            successful clone. Omitted from the on-disk payload when
+            ``None`` so runs that never cloned keep the pre-existing
+            shape.
 
         Raises
         ------
@@ -364,6 +378,8 @@ class StateStore:
             "git_pushed": bool(git_pushed),
             "migrated": {str(src): gh for src, gh in migrated.items()},
         }
+        if clone_path is not None:
+            payload["clone_path"] = clone_path
         _atomic_write_json(self._state_path, payload)
 
     def prepare(self) -> None:
@@ -431,6 +447,7 @@ class StateStore:
             "repo_created": False,
             "git_pushed": False,
             "migrated": {},
+            "clone_path": None,
         }
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid

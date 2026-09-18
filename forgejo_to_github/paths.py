@@ -20,6 +20,11 @@ def default_state_base() -> Path:
     return Path(platformdirs.user_state_dir(APP_NAME))
 
 
+def default_cache_base() -> Path:
+    """Return the platform user-cache root for this application."""
+    return Path(platformdirs.user_cache_dir(APP_NAME))
+
+
 def state_path_for(base: Path, source: str, target: str) -> Path:
     """Return the per-migration state file path under ``base``.
 
@@ -36,4 +41,23 @@ def state_path_for(base: Path, source: str, target: str) -> Path:
         / target_owner
         / target_repo
         / "state.json"
+    )
+
+
+def cache_path_for(base: Path, source: str, target: str) -> Path:
+    """Return the per-migration cached-mirror path under ``base``.
+
+    ``source`` and ``target`` are ``OWNER/REPO`` strings. The layout is
+    ``<base>/<source-owner>/<source-repo>/<target-owner>/<target-repo>/mirror.git``
+    so each source→target migration keeps an independent clone cache.
+    """
+    source_owner, source_repo = source.split("/", 1)
+    target_owner, target_repo = target.split("/", 1)
+    return (
+        Path(base)
+        / source_owner
+        / source_repo
+        / target_owner
+        / target_repo
+        / "mirror.git"
     )
