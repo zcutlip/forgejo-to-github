@@ -1,6 +1,8 @@
-# Local clone invocation simplification & avoid redundant clone
+# Local-checkout sourcing (`--cwd` / omit-plus-confirm + local clone into cache)
 
 **GitHub issue:** [#6](https://github.com/zcutlip/forgejo-to-github/issues/6)
+**Branch:** `dev/6-local-clone-invocation`
+**Status:** spec draft — decisions below are locked unless marked **OPEN**.
 
 ## Context
 
@@ -10,29 +12,117 @@ Typical invocation from inside local clone:
 f2gh --source zcutlip/"$(basename $(pwd))" --target zcutlip/"$(basename $(pwd))" --public
 ```
 
-User runs from repo root, `source`/`target` derived from `basename $(pwd)`, but currently requires explicit `--source`/`--target` and always does `git clone --mirror` from Codeberg even though `cwd` already has the full repo.
+User runs from repo root, `source`/`target` derived from `basename $(pwd)`,
+but currently requires explicit `--source`/`--target` and always does
+`git clone --mirror` from Codeberg even though `cwd` already has the full repo.
 
-## Goals
+Original intent (locked): if we have the project locally we can skip having
+to provide the source project and skip cloning the repo *over the network*.
+Issues/metadata still come from the Forgejo API — only the *clone* goes local.
 
-(a) **Simplify invocation when run from local clone** — e.g., auto-detect `owner/repo` from `git config --get remote.origin.url` or `basename $(pwd)` if origin matches Codeberg pattern `ssh://codeberg.org/...` or `https://codeberg.org/...`, allow shorthand forms:
+## Locked contract
 
-- `f2gh --public` (infer both source and target from local clone)
-- `f2gh --target zcutlip/foo` (infer source from local clone)
+### 1. Slug sourcing (A3 + explicit `--cwd`)
 
-(b) **Avoid redundant clone** — if `cwd` is a valid git repo with the source remote, push directly from local (`git push --all` / `--tags` to target) or use `git bundle` / local tmpdir seeded from `cwd` instead of network `git clone --mirror`, saving time and handling offline/network failure gracefully.
+- `--source` becomes optional. When missing, infer `owner/repo` from the
+  cwd's `remote.origin.url` (must match Codeberg SSH/HTTPS patterns,
+  optional `.git` suffix — non-match is a usage error, exit 2, since the
+  issues API needs a Codeberg slug).
+- Omit-plus-confirm: inference stops with a hard prompt before anything
+  mutates (`Inferred source X from <path> — proceed? [y/N]`). Wrong
+  directory becomes a No, not a migration. Non-tty EOF denies.
+- Optional `--cwd`: explicit opt-in to cwd inference that **bypasses the
+  inference prompt only** (intent already expressed). It replaces `--yes`
+  for that one prompt — create-repo, freshness, and all other prompts still
+  follow normal `--yes` rules.
+- Guards: `--yes` requires explicit `--source`; non-tty denies inference.
 
-## Considerations
+### 2. Validated cwd implies local objects (A and B re-coupled)
 
-- Detect `cwd` is a git repo: `git rev-parse --is-inside-work-tree` (exit 0 = inside work tree).
-- Parse `remote.origin.url`: confirm it matches requested source (or inferred source) and matches Codeberg host patterns (`codeberg.org[:/]owner/repo` with optional `.git` suffix).
-- Fallback to remote `git clone --mirror` if not a repo, or origin does not match requested source, or parsing fails.
-- Preserve deterministic state handling (`state.json` atomic writes via `os.replace`).
-- Explicit flags override auto-detect — `--source`/`--target` when given take precedence; auto-detect only fills missing values.
-- Keep behavior non-breaking: existing explicit invocations must continue to work unchanged.
+- Once cwd validates as the intended source repo (via `--cwd` or accepted
+  inference prompt), **B-local follows automatically**: clone from the
+  absolutized local path into the per-migration cache. No second trigger,
+  no B-network-after-inference path.
+- Network clone remains only for non-local runs (explicit `--source`, no
+  valid cwd involved). Existing explicit invocations work unchanged.
+- Everything downstream is the untouched #5 flow: checkpoint `clone_path`,
+  validate (bare + origin), evict-before-reclone, push, `--clean`,
+  delete-on-success / keep-on-push-failure, `git_pushed` semantics.
+  `GitMirror.source_url` is just argv — a local path works verbatim.
+
+### 3. Cwd checks (in order, first failure is usage error, exit 2)
+
+1. Inside a work tree (`git rev-parse --is-inside-work-tree`).
+2. `remote.origin.url` exists.
+3. Origin matches Codeberg patterns (`codeberg.org[:/]owner/repo`,
+   optional `.git`).
+4. Absolutize via `Path.resolve()` so the cached mirror's `origin.url`
+   has a stable form for resume validation.
+
+### 4. Target inference
+
+- `--target` optional, defaults to `<gh-user>/<source-repo>` where
+  `<gh-user>` comes from `gh api user --jq .login` and repo from the
+  (explicit or inferred) source slug.
+- `gh` lookup failure → require explicit `--target` (graceful, never hard).
+- `--yes` requires explicit `--target`.
+
+### 5. Freshness — required, definition OPEN
+
+A freshness check is required. **OPEN:** exact probe semantics. Working
+shape (not locked): read-only `ls-remote`, never fetch; behind → prompt via
+prompter seam; ahead → announce and proceed (local-only branches ride with
+`--all`, visibly); probe failure → warn and continue.
+
+### 6. Dirt — courtesy-only (locked)
+
+`git status --porcelain` notice only ("uncommitted changes present; only
+committed refs migrate"). Never blocking, never gating — uncommitted work
+is unreachable from refs so it cannot affect the migration; the notice
+closes the expectation gap only.
+
+### 7. Announcements (stdout)
+
+- `Using local checkout <path> as clone source (origin <url>)` plus
+  ahead/behind/dirt notices as applicable.
+- Dry-run reports the inferred slug + `would clone from <path>`; no
+  subprocess beyond the read-only probes.
+- `--clean` accepts `--cwd`/inference for slug resolution.
+
+### 8. Resume / forms / semantics
+
+- Cached mirror's `origin.url` is the absolutized local path; a later
+  `--source` (URL-form) resume mismatches → fresh clone (safe direction).
+- Semantics (documented): local sourcing migrates your *local* state, which
+  may differ from Codeberg's.
+
+## Explicitly dropped
+
+- **B-direct** (push `--all`/`--tags` straight from cwd, no clone):
+  saves only a seconds-long local copy while losing the frozen-snapshot
+  invariant #5's resume rests on. Dropped, not deferred.
+- **`git bundle`**: copies all objects into a pack file (no hardlinks),
+  then clone bundle → cache adds a second copy — worse on disk than B-local
+  everywhere, ties nowhere. Dropped.
+- **Goal (a) shorthand `f2gh --public` inferring both**: superseded —
+  `--target` defaults per §4 instead of being inferred from cwd alone.
+- **Silent fallback to network clone**: with explicit intent (`--cwd` or
+  accepted prompt), failure is a usage error (exit 2), never a silent
+  fallback.
+
+## Accepted edge (document, don't fix)
+
+- **Cross-volume local clone**: hardlinks apply only on the same filesystem
+  (plain path form, never `file://` URL). Cwd on external storage → full
+  copy (transient on success, retained on push failure). Accept and document;
+  `B-direct` is not revived for this edge.
 
 ## Advisory — SSH push path (contingent on local checkout)
 
-The SSH-based workaround advisory below is **contingent on working from a local checkout** and must only be shown when `f2gh` detects it is running from inside a local checkout of the source repo:
+Preserved as future work. The SSH-based workaround advisory stays contingent
+on working from a local checkout of the source repo; validated-cwd
+simplifies its future detection (known rather than detected) instead of the
+`is_local_checkout` probe sketched here before:
 
 ```
   2) git remote add github git@github.com:OWNER/REPO.git
@@ -42,20 +132,21 @@ The SSH-based workaround advisory below is **contingent on working from a local 
      Note: --all pushes only local branches...
 ```
 
-- **Show when** `is_local_checkout == true`: `git rev-parse --is-inside-work-tree` succeeds (true) **and** `remote.origin.url` matches `source` (Codeberg host patterns `codeberg.org[:/]owner/repo` with optional `.git` suffix).
-- **Otherwise, do not show** — fall back to the `gh auth refresh -h github.com -s workflow` path or the full `git clone --mirror` workaround.
+## Tests (RED, separate gate)
 
-> Implementation note: advisory selection logic should branch on `is_local_checkout` (reuse `is_cwd_valid_source_mirror(source)` / `resolve_source_target_from_cwd()`). This contingency is for future implementation — keep existing explicit invocations non-breaking.
-
-## Next steps
-
-- Design CLI flag like `--from-cwd` or auto-detect with `--source auto` — discuss UX tradeoff (explicit opt-in vs. implicit inference).
-- Prototype `resolve_source_target_from_cwd()` helper: returns inferred `(owner, repo)` or `None`.
-- Prototype `is_cwd_valid_source_mirror(source)` check: verifies `cwd` tracks the expected Codeberg remote.
-- Evaluate push strategy: direct `git push --mirror` from `cwd` vs. `git bundle create` + local `--mirror` tmpdir.
-- Add dry-run messaging to indicate when local clone path is used vs. network clone.
+- Cwd-check matrix (non-repo / no-origin / non-Codeberg-origin /
+  `.git`-suffixed / SSH forms) + exit-2 messages.
+- Omit-plus-confirm accept/deny; `--cwd` skips inference prompt; `--yes`
+  requires explicit `--source`/`--target`; non-tty denies.
+- Announcement lines; ahead/behind/dirt notices (freshness asserts follow
+  the deferred definition).
+- Absolutize-stability; form-mismatch resume → fresh clone;
+  no-fetch-ever assertion (scripted runner rejects mutating argv);
+  dry-run messaging; `--clean` with inference.
+- Existing explicit-invocation suite passes unchanged.
 
 ## References
 
 - Issue #1
 - Session note #5
+- Plans `04-retain-clone-cache.md` (#5 — the cache flow reused verbatim)
