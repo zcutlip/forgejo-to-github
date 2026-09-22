@@ -2,7 +2,7 @@
 
 **GitHub issue:** [#6](https://github.com/zcutlip/forgejo-to-github/issues/6)
 **Branch:** `dev/6-local-clone-invocation`
-**Status:** spec draft — decisions below are locked unless marked **OPEN**.
+**Status:** spec — all decisions locked.
 
 ## Context
 
@@ -35,7 +35,14 @@ Issues/metadata still come from the Forgejo API — only the *clone* goes local.
   inference prompt only** (intent already expressed). It replaces `--yes`
   for that one prompt — create-repo, freshness, and all other prompts still
   follow normal `--yes` rules.
+- `--cwd` × explicit `--source`, three cases: cwd origin matches `--source`
+  → local clone, no prompt; mismatch → usage error, exit 2 (never silently
+  prefer one — wrong objects for the other slug means a bad destination);
+  `--source` alone → today's network flow.
 - Guards: `--yes` requires explicit `--source`; non-tty denies inference.
+  Called out explicitly: `--yes` combined with cwd sourcing auto-accepts
+  the freshness prompt (§5), so a stale checkout can migrate unattended —
+  that is a choice the user makes, not an accident.
 
 ### 2. Validated cwd implies local objects (A and B re-coupled)
 
@@ -53,18 +60,38 @@ Issues/metadata still come from the Forgejo API — only the *clone* goes local.
 ### 3. Cwd checks (in order, first failure is usage error, exit 2)
 
 1. Inside a work tree (`git rev-parse --is-inside-work-tree`).
-2. `remote.origin.url` exists.
-3. Origin matches Codeberg patterns (`codeberg.org[:/]owner/repo`,
-   optional `.git`).
-4. Absolutize via `Path.resolve()` so the cached mirror's `origin.url`
+2. `remote.origin.url` resolves — read via `git ls-remote --get-url origin`
+   so `url.insteadOf` shortcuts apply (a raw `config --get` would spuriously
+   reject `cb:owner/repo`). ssh-config `Host` aliases remain unsupported
+   and are documented as such.
+3. Origin matches Codeberg patterns (`codeberg.org[:/]owner/repo`, optional
+   `.git`, host match case-insensitive).
+4. Not a shallow checkout (`git rev-parse --is-shallow-repository`). A
+   `--depth` clone has the remote tip locally, so §5 would classify it
+   *equal* and wave it through; the shallow mirror is then rejected on push
+   (`shallow update not allowed`) while issues still migrate onto an empty
+   repo, and the retained cache re-fails identically on every resume.
+5. Not a partial/promisor clone (`git config --get extensions.partialclone`
+   present). Inconclusive in the local experiment (`file://` ignored
+   `--filter`), so one config check is cheap insurance.
+6. Absolutize via `Path.resolve()` so the cached mirror's `origin.url`
    has a stable form for resume validation.
+
+Checks 4–5 gate the clone and so apply under the same "when" as §5 (local
+clone runs only; never for `--skip-git` or network-clone runs).
 
 ### 4. Target inference
 
 - `--target` optional, defaults to `<gh-user>/<source-repo>` where
-  `<gh-user>` comes from `gh api user --jq .login` and repo from the
-  (explicit or inferred) source slug.
-- `gh` lookup failure → require explicit `--target` (graceful, never hard).
+  `<gh-user>` is resolved from the **credential actually used** — `GET /user`
+  with the resolved GitHub token — and repo from the (explicit or inferred)
+  source slug. Not from `gh api user`: the CLI prefers `GITHUB_TOKEN` over
+  `gh auth token`, and when the two name different accounts, `gh`-derived
+  inference would announce one owner while `create_repository` posts as the
+  other, landing the repo under an account the subsequent pushes and issue
+  creates cannot reach. Same request cost, and it removes the `gh`
+  dependency from this lookup.
+- `GET /user` failure → require explicit `--target` (graceful, never hard).
 - `--yes` requires explicit `--target`.
 
 ### 5. Freshness (locked)
@@ -81,7 +108,11 @@ reachable objects), so no separate object check is needed.
 - **Scope:** `refs/heads/*` + `refs/tags/*` only, filtered before
   classifying — forges may advertise synthetic namespaces (`refs/pull/*`,
   etc.) that a clone never carries, and unscoped comparison would prompt
-  about them on every run, unsatisfiably. Driven by the **remote** ref
+  about them on every run, unsatisfiably. Peeled tag lines
+  (`refs/tags/*^{}`, which `ls-remote` emits alongside every annotated tag)
+  are excluded too: classifying them would compare the remote *commit* SHA
+  against the local *tag-object* SHA and report "moved upstream" on every
+  run, the same unsatisfiable-prompt class. Driven by the **remote** ref
   list: each advertised ref must resolve locally (catches remote-only refs
   that same-named-pair comparison would miss).
 - **Heads:** equal / ahead-or-diverged (remote tip present locally, tips
@@ -94,13 +125,24 @@ reachable objects), so no separate object check is needed.
 - **Policy:** any behind/missing/moved → single unified prompt via the
   prompter seam ("N branches behind, tag v1.3 missing locally, tag v2.0
   moved upstream — migrate local state anyway?"), deny aborts before
-  anything mutates. Ahead/local-only → one combined announce-and-proceed
-  notice ("local-only refs that will migrate: branches […], tags […]").
+  anything mutates. When local-only refs coexist, their list is folded into
+  that same prompt text so consent covers what will be published — a
+  consent prompt that omits "branches [secret-branch] will migrate" is
+  consent to something the user never saw. Ahead/local-only only → one
+  combined announce-and-proceed notice ("local-only refs that will
+  migrate: branches […], tags […]").
 - **When:** only when a local clone will actually happen. Skipped under
   `--skip-git` (no objects needed — staleness must not block an
   issues-only run) and for network-clone runs (nothing local to check).
 - **Probe failure → warn and continue** (the API phases fail fast on their
-  own if the network is truly down).
+  own if the network is truly down). The probes run with
+  `GIT_TERMINAL_PROMPT=0` and ssh `BatchMode=yes` so that an SSH host-key
+  or passphrase prompt, or an HTTPS private origin needing credentials,
+  fails fast instead of blocking on the tty mid-run — an unbounded hang is
+  the one outcome the warn path cannot reach.
+- **`--yes` interaction:** with `--yes` (and cwd sourcing), this prompt
+  auto-accepts, so stale local state migrates unattended. Explicit and
+  intentional (§1); fresh checkouts should be the norm under automation.
 - **Rationale:** full offline is incoherent (issues/GitHub APIs need
   network regardless); the probe's purpose is catching stale checkouts,
   and it costs kilobytes.
@@ -108,9 +150,10 @@ reachable objects), so no separate object check is needed.
 ### 6. Dirt — courtesy-only (locked)
 
 `git status --porcelain` notice only ("uncommitted changes present; only
-committed refs migrate"). Never blocking, never gating — uncommitted work
-is unreachable from refs so it cannot affect the migration; the notice
-closes the expectation gap only.
+branches and tags migrate" — not "committed refs", since a detached-HEAD
+commit is committed yet not on any branch). Never blocking, never gating —
+uncommitted work is unreachable from refs so it cannot affect the
+migration; the notice closes the expectation gap only.
 
 ### 7. Announcements (stdout)
 
@@ -154,6 +197,16 @@ closes the expectation gap only.
   (plain path form, never `file://` URL). Cwd on external storage → full
   copy (transient on success, retained on push failure). Accept and document;
   `B-direct` is not revived for this edge.
+- **Extra refs in the retained cache** (verified): `git clone --mirror` from
+  a checkout also carries `refs/stash` and `refs/remotes/origin/*`.
+  `push --all`/`--tags` never send them, so nothing reaches GitHub; the
+  residue is local only (the user's own stash under `~/.cache/f2gh/…` on a
+  push failure, bounded by success-delete and `--clean`). Documented as
+  accepted rather than pruned: pruning would add a deletion step to the
+  highest-stakes path (the clone) with its own failure policy, and would
+  soften the pristine-mirror invariant, to remove narrow local residue on
+  the user's own disk. Revisit if the cache directory ever becomes shared
+  or synced.
 
 ## Advisory — SSH push path (contingent on local checkout)
 
@@ -173,19 +226,31 @@ simplifies its future detection (known rather than detected) instead of the
 ## Tests (RED, separate gate)
 
 - Cwd-check matrix (non-repo / no-origin / non-Codeberg-origin /
-  `.git`-suffixed / SSH forms) + exit-2 messages.
-- Omit-plus-confirm accept/deny; `--cwd` skips inference prompt; `--yes`
-  requires explicit `--source`/`--target`; non-tty denies.
+  `.git`-suffixed / SSH forms / case-varied host) + exit-2 messages.
+- `insteadOf`-rewritten origin (`cb:owner/repo`) accepted; ssh `Host` alias
+  documented unsupported.
+- Shallow checkout → exit 2; partial clone (`extensions.partialclone`) →
+  exit 2.
+- Omit-plus-confirm accept/deny; `--cwd` skips inference prompt; `--cwd` ×
+  `--source` match → local clone / mismatch → exit 2; `--yes` requires
+  explicit `--source`/`--target`; non-tty denies.
+- Target inference resolves `<gh-user>` from `GET /user` with the resolved
+  token (mocked), including the token-vs-`gh` divergence case; lookup
+  failure → explicit `--target` required.
 - Announcement lines; ahead/behind/dirt notices (binary per-ref status,
-  unified behind/missing/moved prompt with deny-aborts, combined
-  local-only-refs notice, probe-failure warning).
-- Absolutize-stability; form-mismatch resume → fresh clone;
-  no-fetch-ever assertion (scripted runner rejects mutating argv);
-  dry-run messaging; `--clean` with inference.
+  peeled tag lines excluded from classification, unified
+  behind/missing/moved prompt with deny-aborts, local-only list folded into
+  the prompt when both coexist, combined local-only-refs notice,
+  probe-failure warning).
+- Probe env assertion (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode=yes`) inside
+  the no-fetch-ever seam.
+- Absolutize-stability; form-mismatch resume → fresh clone; no-fetch-ever
+  assertion (scripted runner rejects mutating argv); dry-run messaging;
+  `--clean` with inference; `--clean --dry-run` + inference.
 - Existing explicit-invocation suite passes unchanged.
 
 ## References
 
 - Issue #1
-- Session note #5
 - Plans `04-retain-clone-cache.md` (#5 — the cache flow reused verbatim)
+- Audit `05-local-clone-invocation-audit.md` (findings 1–8 folded in)
