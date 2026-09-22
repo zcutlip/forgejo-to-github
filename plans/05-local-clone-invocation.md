@@ -67,12 +67,30 @@ Issues/metadata still come from the Forgejo API — only the *clone* goes local.
 - `gh` lookup failure → require explicit `--target` (graceful, never hard).
 - `--yes` requires explicit `--target`.
 
-### 5. Freshness — required, definition OPEN
+### 5. Freshness (locked)
 
-A freshness check is required. **OPEN:** exact probe semantics. Working
-shape (not locked): read-only `ls-remote`, never fetch; behind → prompt via
-prompter seam; ahead → announce and proceed (local-only branches ride with
-`--all`, visibly); probe failure → warn and continue.
+Read-only `ls-remote` against the origin, never fetch (a fetch would mutate
+the user's checkout and redefine "local state"). Exact "N commits behind"
+is uncomputable without the objects locally, so status is binary per ref:
+
+- **Scope:** all heads. Each local branch vs same-named remote ref:
+  equal / ahead-or-diverged (remote tip present locally, tips differ) /
+  behind (remote tip unknown locally).
+- **Tags follow the superset rule:** local tags must cover all remote tags.
+  Missing-locally or moved (same name, different SHA) joins the prompt
+  below. Local-only tags are allowed and migrate with everything else
+  (announced, never blocked) — uniform with ahead branches: all local refs
+  migrate.
+- **Policy:** any behind/missing/moved → single unified prompt via the
+  prompter seam ("N branches behind, tag v1.3 missing locally, tag v2.0
+  moved upstream — migrate local state anyway?"), deny aborts before
+  anything mutates. Ahead/local-only → one combined announce-and-proceed
+  notice ("local-only refs that will migrate: branches […], tags […]").
+- **Probe failure → warn and continue** (the API phases fail fast on their
+  own if the network is truly down).
+- **Rationale:** full offline is incoherent (issues/GitHub APIs need
+  network regardless); the probe's purpose is catching stale checkouts,
+  and it costs kilobytes.
 
 ### 6. Dirt — courtesy-only (locked)
 
@@ -110,6 +128,13 @@ closes the expectation gap only.
   accepted prompt), failure is a usage error (exit 2), never a silent
   fallback.
 
+## Deferred enhancement (not in scope)
+
+- **Local-only tag exclusion**: dropping local-only tags from the mirror
+  before push. Decided against for now — it would mutate the pristine-mirror
+  invariant and need recompute-or-persist across resume, all to avoid
+  cosmetic tag-namespace noise. Revisit with evidence of real pain.
+
 ## Accepted edge (document, don't fix)
 
 - **Cross-volume local clone**: hardlinks apply only on the same filesystem
@@ -138,8 +163,9 @@ simplifies its future detection (known rather than detected) instead of the
   `.git`-suffixed / SSH forms) + exit-2 messages.
 - Omit-plus-confirm accept/deny; `--cwd` skips inference prompt; `--yes`
   requires explicit `--source`/`--target`; non-tty denies.
-- Announcement lines; ahead/behind/dirt notices (freshness asserts follow
-  the deferred definition).
+- Announcement lines; ahead/behind/dirt notices (binary per-ref status,
+  unified behind/missing/moved prompt with deny-aborts, combined
+  local-only-refs notice, probe-failure warning).
 - Absolutize-stability; form-mismatch resume → fresh clone;
   no-fetch-ever assertion (scripted runner rejects mutating argv);
   dry-run messaging; `--clean` with inference.
