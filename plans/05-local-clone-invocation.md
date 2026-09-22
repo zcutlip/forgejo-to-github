@@ -69,13 +69,23 @@ Issues/metadata still come from the Forgejo API — only the *clone* goes local.
 
 ### 5. Freshness (locked)
 
-Read-only `ls-remote` against the origin, never fetch (a fetch would mutate
-the user's checkout and redefine "local state"). Exact "N commits behind"
-is uncomputable without the objects locally, so status is binary per ref:
+The repo-wide superset invariant: everything present remotely is present
+locally and in sync; the only allowed exceptions are refs absent remotely
+(locally-created branches and tags). Read-only `ls-remote` against the
+origin, never fetch (a fetch would mutate the user's checkout and redefine
+"local state"). Exact "N commits behind" is uncomputable without the
+objects locally, so status is binary per ref. Tip containment implies
+object coverage (a remote tip contained in local history brings all its
+reachable objects), so no separate object check is needed.
 
-- **Scope:** all heads. Each local branch vs same-named remote ref:
-  equal / ahead-or-diverged (remote tip present locally, tips differ) /
-  behind (remote tip unknown locally).
+- **Scope:** `refs/heads/*` + `refs/tags/*` only, filtered before
+  classifying — forges may advertise synthetic namespaces (`refs/pull/*`,
+  etc.) that a clone never carries, and unscoped comparison would prompt
+  about them on every run, unsatisfiably. Driven by the **remote** ref
+  list: each advertised ref must resolve locally (catches remote-only refs
+  that same-named-pair comparison would miss).
+- **Heads:** equal / ahead-or-diverged (remote tip present locally, tips
+  differ) / behind (remote tip unknown locally).
 - **Tags follow the superset rule:** local tags must cover all remote tags.
   Missing-locally or moved (same name, different SHA) joins the prompt
   below. Local-only tags are allowed and migrate with everything else
@@ -86,6 +96,9 @@ is uncomputable without the objects locally, so status is binary per ref:
   moved upstream — migrate local state anyway?"), deny aborts before
   anything mutates. Ahead/local-only → one combined announce-and-proceed
   notice ("local-only refs that will migrate: branches […], tags […]").
+- **When:** only when a local clone will actually happen. Skipped under
+  `--skip-git` (no objects needed — staleness must not block an
+  issues-only run) and for network-clone runs (nothing local to check).
 - **Probe failure → warn and continue** (the API phases fail fast on their
   own if the network is truly down).
 - **Rationale:** full offline is incoherent (issues/GitHub APIs need
