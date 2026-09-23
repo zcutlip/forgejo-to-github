@@ -558,25 +558,26 @@ def _build_orchestrator(args: argparse.Namespace) -> MigrationOrchestrator:
 
 def main() -> None:
     args = parse_args()
-    # Resolve source/target before anything else: explicit slugs pass
-    # through untouched, while omitted ones infer (cwd checkout for the
-    # source, GET /user for the target) with the documented prompts.
-    # The resolved slugs are stored back so state/mirror paths, the
-    # orchestrator, and the resume hint all observe the same values.
-    prompter = _make_yes_prompter(bool(getattr(args, "yes", False)))
-    source_slug, cwd_source = resolve_source(args, _git_runner, prompter)
-    args.source = source_slug
-    args.cwd_source = cwd_source
-    if bool(getattr(args, "clean", False)):
-        # --clean stays tokenless and offline: source may infer from the
-        # checkout (local probes only), but the target must be explicit.
-        args.target = resolve_clean_target(args)
-    else:
-        args.target = _resolve_migration_target(args, source_slug)
-        if cwd_source is not None and not bool(getattr(args, "skip_git", False)):
-            gate_local_source(_git_runner, cwd_source, prompter)
-    state_path = _resolve_state_path(args)
+    state_path: Path | None = None
     try:
+        # Resolve source/target before anything else: explicit slugs pass
+        # through untouched, while omitted ones infer (cwd checkout for the
+        # source, GET /user for the target) with the documented prompts.
+        # The resolved slugs are stored back so state/mirror paths, the
+        # orchestrator, and the resume hint all observe the same values.
+        prompter = _make_yes_prompter(bool(getattr(args, "yes", False)))
+        source_slug, cwd_source = resolve_source(args, _git_runner, prompter)
+        args.source = source_slug
+        args.cwd_source = cwd_source
+        if bool(getattr(args, "clean", False)):
+            # --clean stays tokenless and offline: source may infer from the
+            # checkout (local probes only), but the target must be explicit.
+            args.target = resolve_clean_target(args)
+        else:
+            args.target = _resolve_migration_target(args, source_slug)
+            if cwd_source is not None and not bool(getattr(args, "skip_git", False)):
+                gate_local_source(_git_runner, cwd_source, prompter)
+        state_path = _resolve_state_path(args)
         if bool(getattr(args, "clean", False)):
             sys.exit(_run_clean(args, state_path))
         orchestrator = _build_orchestrator(args)
@@ -590,7 +591,7 @@ def main() -> None:
         reporter.render_final(result)
         sys.exit(reporter.exit_outcome(result))
     except KeyboardInterrupt:
-        if args.dry_run:
+        if args.dry_run or state_path is None:
             print("Interrupted by user.", file=sys.stderr)
         else:
             print(
