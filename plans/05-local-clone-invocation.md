@@ -93,6 +93,12 @@ clone runs only; never for `--skip-git` or network-clone runs).
   dependency from this lookup.
 - `GET /user` failure → require explicit `--target` (graceful, never hard).
 - `--yes` requires explicit `--target`.
+- `--clean` always requires an explicit `--target` (exit 2 without it),
+  `--cwd` or not: resolving a default would need the tokened `GET /user`,
+  contradicting `--clean`'s tokenless, offline guarantee, and the namespace
+  cannot be derived — so the run stops instead of guessing. This preserves
+  today's CLI behavior (`--target` is already required) under the new
+  optionality.
 
 ### 5. Freshness (locked)
 
@@ -115,17 +121,29 @@ reachable objects), so no separate object check is needed.
   run, the same unsatisfiable-prompt class. Driven by the **remote** ref
   list: each advertised ref must resolve locally (catches remote-only refs
   that same-named-pair comparison would miss).
-- **Heads:** equal / ahead-or-diverged (remote tip present locally, tips
-  differ) / behind (remote tip unknown locally).
+- **Heads:** equal (tips identical) / ahead (remote tip is an ancestor of
+  the same-name local branch tip, tips differ) / divergent-or-behind.
+  Containment is checked per head, e.g. `git merge-base --is-ancestor
+  <remote-tip> <local-tip>`: a remote tip that is not an ancestor of the
+  same-name local branch is divergent — never equal, never safe-ahead —
+  even when the object exists locally via another ref (a fetched-but-unmerged
+  remote-tracking branch, another local branch, a tag, or reset-away history
+  still present in the object store). A remote tip unknown locally at all is
+  behind. Bare object presence (`cat-file`-style existence) must never be
+  the test: it cannot distinguish "ahead" from "diverged".
 - **Tags follow the superset rule:** local tags must cover all remote tags.
   Missing-locally or moved (same name, different SHA) joins the prompt
   below. Local-only tags are allowed and migrate with everything else
   (announced, never blocked) — uniform with ahead branches: all local refs
   migrate.
-- **Policy:** any behind/missing/moved → single unified prompt via the
-  prompter seam ("N branches behind, tag v1.3 missing locally, tag v2.0
-  moved upstream — migrate local state anyway?"), deny aborts before
-  anything mutates. When local-only refs coexist, their list is folded into
+- **Policy:** any behind/missing/moved/divergent → single unified prompt via
+  the prompter seam ("N branches behind, branch main not containing origin's
+  tip, tag v1.3 missing locally, tag v2.0 moved upstream — migrate local
+  state anyway?"), deny aborts before anything mutates. The prompt names
+  each divergent branch, states the non-containment, and states the
+  consequence (its local tip will be published as-is). No second prompt —
+  this is the same unified prompt, extended. When local-only refs coexist,
+  their list is folded into
   that same prompt text so consent covers what will be published — a
   consent prompt that omits "branches [secret-branch] will migrate" is
   consent to something the user never saw. Ahead/local-only only → one
@@ -141,8 +159,9 @@ reachable objects), so no separate object check is needed.
   fails fast instead of blocking on the tty mid-run — an unbounded hang is
   the one outcome the warn path cannot reach.
 - **`--yes` interaction:** with `--yes` (and cwd sourcing), this prompt
-  auto-accepts, so stale local state migrates unattended. Explicit and
-  intentional (§1); fresh checkouts should be the norm under automation.
+  auto-accepts — behind, divergent, missing, and moved alike — so stale
+  local state migrates unattended. Explicit and intentional (§1); fresh
+  checkouts should be the norm under automation.
 - **Rationale:** full offline is incoherent (issues/GitHub APIs need
   network regardless); the probe's purpose is catching stale checkouts,
   and it costs kilobytes.
@@ -164,7 +183,10 @@ pre-flight plan (#16); this notice only ensures the user is told.
   ahead/behind/dirt notices as applicable.
 - Dry-run reports the inferred slug + `would clone from <path>`; no
   subprocess beyond the read-only probes.
-- `--clean` accepts `--cwd`/inference for slug resolution.
+- `--clean` accepts `--cwd`/inference for *source* resolution, but always
+  requires an explicit `--target` (exit 2 without it, `--dry-run` included)
+  — a default would need a tokened network call, contradicting `--clean`'s
+  tokenless, offline guarantee.
 
 ### 8. Resume / forms / semantics
 
@@ -247,16 +269,24 @@ simplifies its future detection (known rather than detected) instead of the
   probe-failure warning).
 - Probe env assertion (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode=yes`) inside
   the no-fetch-ever seam.
+- Divergent-branch freshness: remote tip present locally only via another
+  ref (fetched-but-unmerged remote-tracking branch) with the same-name
+  branch not containing it → unified prompt, deny aborts; genuinely-ahead
+  descendant control passes with notice only; exactly one prompt fires when
+  both coexist; ancestor machinery asserted through the injected runner.
 - Absolutize-stability; form-mismatch resume → fresh clone; no-fetch-ever
   assertion (scripted runner rejects mutating argv); dry-run messaging;
   `--clean` with inference; `--clean --dry-run` + inference.
+- `--clean` without `--target` → exit 2 (plain, `--cwd`, and `--dry-run`
+  forms); `--clean --cwd --target X` stays tokenless (no token read, no
+  network); explicit `--clean --source X --target Y` unchanged.
 - Existing explicit-invocation suite passes unchanged.
 
 ## References
 
 - Issue #1
 - Plans `04-retain-clone-cache.md` (#5 — the cache flow reused verbatim)
-- Audit `05-local-clone-invocation-audit.md` (findings 1–8 folded in)
+- Audit `05-local-clone-invocation-audit.md` (findings 1–8, A–B folded in)
 - #16 — single pre-flight plan (expectation-setting and informed consent).
   The uncommitted-changes notice here is informational only; consent lives
   there. #16 also absorbs the former #12 (stale-checkpoint detection/reset).
