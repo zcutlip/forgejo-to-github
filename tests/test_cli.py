@@ -749,7 +749,7 @@ class _InterruptibleRunner:
 
 
 def _valid_cwd_script() -> dict[tuple[str, ...], SimpleNamespace]:
-    """Script the four validation probes; the network probe is KI-injected."""
+    """Script the validation probes; the network probe is KI-injected."""
     return {
         ("git", "rev-parse", "--is-inside-work-tree"): _ok_rc("true\n"),
         ("git", "ls-remote", "--get-url", "origin"): _ok_rc(_ORIGIN_URL + "\n"),
@@ -757,6 +757,7 @@ def _valid_cwd_script() -> dict[tuple[str, ...], SimpleNamespace]:
         ("git", "config", "--get", "extensions.partialclone"): SimpleNamespace(
             returncode=1, stdout="", stderr=""
         ),
+        ("git", "status", "--porcelain"): _ok_rc(""),
     }
 
 
