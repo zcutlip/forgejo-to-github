@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -717,3 +718,97 @@ def test_main_clean_refuses_while_state_locked(
     assert exc_info.value.code == f2gh.EXIT_STATE_ERROR
     captured = capsys.readouterr()
     assert captured.err, "expected a refusal message on stderr"
+
+
+# ---------------------------------------------------------------------------
+# Ctrl+C during cwd resolution (interrupt exits 130, never a traceback)
+# ---------------------------------------------------------------------------
+
+_ORIGIN_URL = "ssh://git@codeberg.org/o/r.git"
+
+
+def _ok_rc(stdout: str) -> SimpleNamespace:
+    return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+
+class _InterruptibleRunner:
+    """Scripted git runner; raises KeyboardInterrupt on the configured argv."""
+
+    def __init__(
+        self,
+        script: dict[tuple[str, ...], SimpleNamespace],
+        interrupt_on: tuple[str, ...],
+    ) -> None:
+        self._script = script
+        self._interrupt_on = interrupt_on
+
+    def __call__(self, argv: list[str], **kwargs: object) -> SimpleNamespace:
+        if tuple(argv) == self._interrupt_on:
+            raise KeyboardInterrupt
+        return self._script[tuple(argv)]
+
+
+def _valid_cwd_script() -> dict[tuple[str, ...], SimpleNamespace]:
+    """Script the four validation probes; the network probe is KI-injected."""
+    return {
+        ("git", "rev-parse", "--is-inside-work-tree"): _ok_rc("true\n"),
+        ("git", "ls-remote", "--get-url", "origin"): _ok_rc(_ORIGIN_URL + "\n"),
+        ("git", "rev-parse", "--is-shallow-repository"): _ok_rc("false\n"),
+        ("git", "config", "--get", "extensions.partialclone"): SimpleNamespace(
+            returncode=1, stdout="", stderr=""
+        ),
+    }
+
+
+def _run_main_expecting_interrupt() -> None:
+    """Run ``main()`` converting an escaped KeyboardInterrupt to a failure.
+
+    Wrapping is required: an escaping KeyboardInterrupt aborts the pytest
+    session instead of recording a normal failure.
+    """
+    try:
+        f2gh.main()
+    except KeyboardInterrupt:
+        pytest.fail("KeyboardInterrupt escaped main() instead of exiting 130")
+
+
+def test_interrupt_during_freshness_probe_exits_130_cleanly(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ctrl+C during the freshness probe exits 130 with the interrupt message."""
+    runner = _InterruptibleRunner(
+        _valid_cwd_script(), interrupt_on=("git", "ls-remote", _ORIGIN_URL)
+    )
+    monkeypatch.setattr(f2gh, "_git_runner", runner)
+    with (
+        patch.object(sys, "argv", ["f2gh", "--cwd", "--target", "o/r"]),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        _run_main_expecting_interrupt()
+
+    assert exc_info.value.code == 130
+    err = capsys.readouterr().err
+    assert "Interrupted by user" in err
+    assert "warning" not in err.lower()
+    assert "Traceback" not in err
+
+
+def test_interrupt_before_state_path_bound_exits_130_cleanly(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ctrl+C during source inference still exits 130 without naming state."""
+    runner = _InterruptibleRunner(
+        _valid_cwd_script(),
+        interrupt_on=("git", "rev-parse", "--is-inside-work-tree"),
+    )
+    monkeypatch.setattr(f2gh, "_git_runner", runner)
+    with (
+        patch.object(sys, "argv", ["f2gh", "--cwd", "--target", "o/r"]),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        _run_main_expecting_interrupt()
+
+    assert exc_info.value.code == 130
+    err = capsys.readouterr().err
+    assert "Interrupted by user" in err
+    assert "state saved to" not in err
