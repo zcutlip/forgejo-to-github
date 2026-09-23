@@ -46,14 +46,27 @@ f2gh --source owner/repo --target owner/repo --dry-run
 f2gh --source owner/repo --target owner/repo
 ```
 
+From inside a local checkout of the source repo the flags can be omitted:
+the source is inferred from the checkout's origin (with one confirm prompt),
+and the target defaults to `<your-github-account>/<repo>`. Pass `--cwd` to
+skip the confirm. The git mirror is cloned from the local path instead of
+the network; everything downstream is unchanged.
+
+```bash
+# From the repo root — infer source, default target, clone locally
+f2gh --cwd --dry-run
+f2gh --cwd
+```
+
 The target repo is created for you (private by default) if it doesn't already exist; the git mirror is pushed before issues are migrated.
 
 ### Options
 
 | Flag | Description |
 |---|---|
-| `--source OWNER/REPO` | Source repo on Codeberg (required) |
-| `--target OWNER/REPO` | Target repo on GitHub (required) |
+| `--source OWNER/REPO` | Source repo on Codeberg (default: inferred from the local checkout) |
+| `--target OWNER/REPO` | Target repo on GitHub (default: `<github-account>/<repo>`) |
+| `--cwd` | Source the migration from the current checkout; skips the inference prompt |
 | `--dry-run` | Preview without making changes |
 | `--yes` | Skip interactive prompts (scripting/CI) |
 | `--skip-git` | Skip the git mirror; migrate issues only |
