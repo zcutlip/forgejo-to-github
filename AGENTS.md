@@ -36,6 +36,7 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
   - State persistence must rely on simple, human-readable file storage (`state.json`) using atomic writes (`os.replace`) to avoid file corruption during abrupt exits.
   - Maintain comment preservation and avoid stripping structural docstrings or inline operational comments when refactoring code.
   - **No cwd-relative paths for new files or directories.** New on-disk locations (state, cache, temp) must be cwd-independent: use `platformdirs` (user state/cache dirs) or an explicit CLI flag. Writing to the process cwd silently couples a run to the directory it was launched from — a known design mistake (`state.json`-in-cwd) that must not be repeated.
+  - **Domain ownership**: When adding rules for a domain concept, identify who owns identity, validation, and lifecycle; don't let related rules accumulate across CLI and helper modules just because each function is stateless; introduce a class only to enforce invariants or coordinate collaborators, keeping pure parsing/formatting as functions.
 - **Dependencies**: Keep external dependencies minimal (prefer standard library or light additions like `requests`). A single-purpose dependency with no transitive dependencies may be added with explicit user approval (e.g. `platformdirs`); otherwise prefer the standard library.
 
 ### C. Testing & Verification Rules
