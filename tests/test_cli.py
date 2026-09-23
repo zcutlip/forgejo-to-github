@@ -40,7 +40,7 @@ from forgejo_to_github.state import StateLockedError, StateWriteError
 # ---------------------------------------------------------------------------
 
 
-def _run_parse_args(argv: list[str]) -> None:
+def _run_parse_args(argv: list[str]) -> argparse.Namespace:
     """Invoke ``f2gh.parse_args`` with the supplied argv.
 
     ``parse_args`` calls ``argparse.ArgumentParser.parse_args`` which
@@ -48,68 +48,37 @@ def _run_parse_args(argv: list[str]) -> None:
     parse_args function itself so we observe the real argparse path.
     """
     with patch.object(sys, "argv", ["f2gh", *argv]):
-        f2gh.parse_args()
+        return f2gh.parse_args()
 
 
 # ---------------------------------------------------------------------------
-# 1. Missing required arguments
+# 1. Source/target optionality and argument validation
 # ---------------------------------------------------------------------------
 
 
-def test_parse_args_missing_source_exits_nonzero_with_usage(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Omitting ``--source`` must SystemExit with code 2 and a usage message."""
-    with pytest.raises(SystemExit) as exc_info:
-        _run_parse_args(["--target", "owner/target"])
+def test_parse_args_source_defaults_none_when_omitted() -> None:
+    """Omitting ``--source`` parses; the slug is inferred later, not by argparse."""
+    args = _run_parse_args(["--target", "owner/target"])
 
-    # argparse uses exit code 2 for argument-validation failures.
-    assert exc_info.value.code == 2
-
-    captured = capsys.readouterr()
-    # argparse writes the usage banner to stderr.
-    assert captured.err, "expected argparse to write usage to stderr"
-    assert "usage:" in captured.err.lower(), (
-        "expected 'usage:' in stderr, got: " + captured.err
-    )
-    # argparse names the offending flag in the error line.
-    assert "--source" in captured.err, (
-        "expected '--source' in stderr error message, got: " + captured.err
-    )
+    assert args.source is None
+    assert args.target == "owner/target"
 
 
-def test_parse_args_missing_target_exits_nonzero_with_usage(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Omitting ``--target`` must SystemExit with code 2 and a usage message."""
-    with pytest.raises(SystemExit) as exc_info:
-        _run_parse_args(["--source", "owner/source"])
+def test_parse_args_target_defaults_none_when_omitted() -> None:
+    """Omitting ``--target`` parses; the default resolves later, not by argparse."""
+    args = _run_parse_args(["--source", "owner/source"])
 
-    assert exc_info.value.code == 2
-
-    captured = capsys.readouterr()
-    assert captured.err
-    assert "usage:" in captured.err.lower()
-    assert "--target" in captured.err, (
-        "expected '--target' in stderr error message, got: " + captured.err
-    )
+    assert args.source == "owner/source"
+    assert args.target is None
 
 
-def test_parse_args_missing_both_required_exits_nonzero(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Omitting both required flags must SystemExit non-zero and show usage."""
-    with pytest.raises(SystemExit) as exc_info:
-        _run_parse_args([])
+def test_parse_args_source_and_target_both_default_none() -> None:
+    """Omitting both flags parses; inference supplies them downstream."""
+    args = _run_parse_args([])
 
-    assert exc_info.value.code == 2
-
-    captured = capsys.readouterr()
-    assert "usage:" in captured.err.lower()
-    # Either or both flags may be referenced; the test only requires usage text.
-    assert ("--source" in captured.err) or ("--target" in captured.err), (
-        "expected at least one required flag named in stderr, got: " + captured.err
-    )
+    assert args.source is None
+    assert args.target is None
+    assert args.cwd is False
 
 
 def test_parse_args_unknown_flag_exits_nonzero_with_usage(

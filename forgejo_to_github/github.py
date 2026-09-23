@@ -396,6 +396,13 @@ class GitHubClient:
         )
         self._raise_for_response(response, url_post)
 
+    def get_current_user(self) -> str:
+        """Return the ``login`` of the authenticated user via ``GET /user``."""
+        url = f"{self._base_url}/user"
+        response = self._request_with_rate_limit_retry("GET", url)
+        self._raise_for_response(response, url)
+        return str(response.json()["login"])
+
     # --- internals ----------------------------------------------------------
 
     def _request_with_rate_limit_retry(
