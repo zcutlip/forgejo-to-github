@@ -87,6 +87,7 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
 ## 4. Planning and Issue Workflow
 
 - Keep active implementation plans in `plans/`, numbered in dependency order.
+- **Audit files are findings-only:** `plans/*-audit.md` files document findings and recommendations; they never change the spec. Adopting a finding is a separate spec-amendment step with its own approval.
 - Identify each active plan's primary GitHub issue near the top of the plan; keep related issues under `References`.
 - Move completed plans to `plans/archive/` rather than deleting them.
 - Comment on a plan's issue when it adds value for an outside reader —
@@ -96,6 +97,8 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
   post state only, or nothing.
 - **External voice for GitHub issues:** Write issues in problem/solution/verification terms for an outside reader. Never cite slice letters, RED/GREEN phases, stop gates, spec files, ledger sections, or memory IDs — those are internal workflow artifacts.
 - **Spec prose and locked tests move together:** When amending a locked test's contract (e.g., raising a threshold), amend the spec prose documenting the rule in the same change. A test-only amendment leaves the spec contradicting the test.
+- **Deliberate contract changes name their stale tests:** When a plan changes a locked contract (e.g., a required flag becomes optional), the spec's test list must name the existing tests that lock the old shape, so RED reopens them explicitly instead of GREEN discovering them as failures.
+- **Pin every new exit path's code in the spec:** When the spec introduces user-facing exit paths (usage errors, declines, aborts), each exit code is part of the contract — an unpinned code gets invented at RED and may contradict an existing path.
 - Treat `plans/archive/02-package-refactor-and-test-foundation/` (the staged
   refactor specification under `refactor/00-index.md`) as the test and
   architecture foundation for later plans; do not implement later
