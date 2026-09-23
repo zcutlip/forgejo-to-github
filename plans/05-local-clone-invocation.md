@@ -147,13 +147,16 @@ reachable objects), so no separate object check is needed.
   network regardless); the probe's purpose is catching stale checkouts,
   and it costs kilobytes.
 
-### 6. Dirt — courtesy-only (locked)
+### 6. Dirt — informational notice (locked)
 
 `git status --porcelain` notice only ("uncommitted changes present; only
 branches and tags migrate" — not "committed refs", since a detached-HEAD
 commit is committed yet not on any branch). Never blocking, never gating —
 uncommitted work is unreachable from refs so it cannot affect the
-migration; the notice closes the expectation gap only.
+migration. The notice is **information, not consent**: a line that scrolls
+past does not set expectations or obtain informed consent, and it does not
+claim to. Setting expectations and obtaining consent is the single
+pre-flight plan (#16); this notice only ensures the user is told.
 
 ### 7. Announcements (stdout)
 
@@ -254,3 +257,6 @@ simplifies its future detection (known rather than detected) instead of the
 - Issue #1
 - Plans `04-retain-clone-cache.md` (#5 — the cache flow reused verbatim)
 - Audit `05-local-clone-invocation-audit.md` (findings 1–8 folded in)
+- #16 — single pre-flight plan (expectation-setting and informed consent).
+  The uncommitted-changes notice here is informational only; consent lives
+  there. #16 also absorbs the former #12 (stale-checkpoint detection/reset).
