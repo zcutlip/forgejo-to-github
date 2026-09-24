@@ -6,7 +6,7 @@ version here — never in ``pyproject.toml`` directly.
 """
 
 __title__: str = "f2gh"
-__version__: str = "1.3.0"
+__version__: str = "1.4.0.dev0"
 __summary__: str = "Migrate repos from Codeberg/Forgejo to GitHub: issues, comments, labels, git mirror"
 
 __all__ = ["__summary__", "__title__", "__version__"]
