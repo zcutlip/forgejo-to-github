@@ -615,9 +615,7 @@ def test_main_reports_lock_contention_distinctly(
 # ---------------------------------------------------------------------------
 
 
-def _isolated_user_dirs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _isolated_user_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Point platform user dirs at tmp_path so --clean never touches home."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
@@ -647,7 +645,9 @@ def test_parse_args_clean_flag_parses(
 ) -> None:
     """--clean parses as a store_true flag alongside source/target."""
     with patch.object(
-        sys, "argv", ["f2gh", "--source", "owner/source", "--target", "owner/target", "--clean"]
+        sys,
+        "argv",
+        ["f2gh", "--source", "owner/source", "--target", "owner/target", "--clean"],
     ):
         args = f2gh.parse_args()
 
@@ -729,9 +729,7 @@ def test_main_clean_refuses_while_state_locked(
     from forgejo_to_github.state import StateStore
 
     _isolated_user_dirs(tmp_path, monkeypatch)
-    state_path = state_path_for(
-        default_state_base(), "owner/source", "owner/target"
-    )
+    state_path = state_path_for(default_state_base(), "owner/source", "owner/target")
     holder = StateStore(state_path, "owner/source", "owner/target")
     holder.prepare()
     try:

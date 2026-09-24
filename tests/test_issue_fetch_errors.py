@@ -238,9 +238,7 @@ def test_orchestrator_propagates_codeberg_404_without_traceback() -> None:
         def __init__(self) -> None:
             self.calls: list[str] = []
 
-        def create_issue(
-            self, title: str, body: str, labels: list[str]
-        ) -> int:
+        def create_issue(self, title: str, body: str, labels: list[str]) -> int:
             self.calls.append("create_issue")
             return 1
 

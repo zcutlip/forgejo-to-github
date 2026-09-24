@@ -644,9 +644,10 @@ def test_403_with_remaining_zero_retries_then_raises() -> None:
     def fake_sleep(s: float) -> None:
         sleep_calls.append(s)
 
-    with patch(
-        "forgejo_to_github.github.time.sleep", side_effect=fake_sleep
-    ), pytest.raises(GitHubRateLimitError) as exc_info:
+    with (
+        patch("forgejo_to_github.github.time.sleep", side_effect=fake_sleep),
+        pytest.raises(GitHubRateLimitError) as exc_info,
+    ):
         client.create_issue(title="t", body="b", labels=[])
 
     assert exc_info.value.reset == 1700000000

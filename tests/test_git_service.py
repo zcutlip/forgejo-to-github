@@ -639,9 +639,9 @@ def test_url_token_is_redacted_in_logged_command(tmp_path: Any, caplog: Any) -> 
         assert TOKEN_SENTINEL not in record.getMessage(), (
             f"raw token leaked into log line: {record.getMessage()!r}"
         )
-    assert any(
-        REDACTED_PLACEHOLDER in r.getMessage() for r in caplog.records
-    ), "expected REDACTED_PLACEHOLDER to appear in at least one log line"
+    assert any(REDACTED_PLACEHOLDER in r.getMessage() for r in caplog.records), (
+        "expected REDACTED_PLACEHOLDER to appear in at least one log line"
+    )
 
 
 def test_extra_header_token_is_redacted_in_command(tmp_path: Any) -> None:
@@ -1003,10 +1003,7 @@ def test_clone_failure_removes_clone_path_before_raising(tmp_path: Any) -> None:
             "https://codeberg.org/owner/repo.git",
             "/tmp/f2gh-repo-0",
         ],
-        stderr=(
-            "fatal: unable to access '...': "
-            "Could not resolve host: codeberg.org"
-        ),
+        stderr=("fatal: unable to access '...': Could not resolve host: codeberg.org"),
         returncode=128,
     )
     runner = _FakeRunner(responses={"clone": cpe})

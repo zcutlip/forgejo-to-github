@@ -83,9 +83,7 @@ class _ScriptedRunner:
             if key in joined:
                 if isinstance(value, BaseException):
                     raise value
-                return SimpleNamespace(
-                    args=args, returncode=0, stdout=value, stderr=""
-                )
+                return SimpleNamespace(args=args, returncode=0, stdout=value, stderr="")
         return SimpleNamespace(args=args, returncode=0, stdout="", stderr="")
 
 
@@ -197,9 +195,7 @@ def _make_repo(mirror_path: Any) -> Any:
     )
 
 
-def _run_orchestrator(
-    *, git: Any, state: Any, mirror_path: Any
-) -> tuple[Any, Any]:
+def _run_orchestrator(*, git: Any, state: Any, mirror_path: Any) -> tuple[Any, Any]:
     orch = MigrationOrchestrator(
         repo=_make_repo(mirror_path),
         codeberg=_EmptyCodeberg(),
@@ -348,9 +344,9 @@ def test_git_phase_checkpoints_clone_path_after_clone(tmp_path: Any) -> None:
 
     assert git.validity_checks == [cache_path]
     assert git.clone_into_calls == [cache_path]
-    assert any(
-        save.get("clone_path") == cache_path for save in state.saves
-    ), f"no save checkpointed clone_path={cache_path!r}: {state.saves!r}"
+    assert any(save.get("clone_path") == cache_path for save in state.saves), (
+        f"no save checkpointed clone_path={cache_path!r}: {state.saves!r}"
+    )
 
 
 def test_resume_with_valid_cache_skips_clone(tmp_path: Any) -> None:
@@ -507,7 +503,4 @@ def test_repository_accepts_optional_mirror_path() -> None:
         ).mirror_path
         == "some/cache/mirror.git"
     )
-    assert (
-        Repository(source="owner/source", target="owner/target").mirror_path
-        is None
-    )
+    assert Repository(source="owner/source", target="owner/target").mirror_path is None
