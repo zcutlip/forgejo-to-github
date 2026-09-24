@@ -44,6 +44,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from f2gh import git_source_url, resolve_clean_target, resolve_source, resolve_target
 from forgejo_to_github.cwd_source import (
     CwdError,
     CwdSource,
@@ -51,8 +53,6 @@ from forgejo_to_github.cwd_source import (
     parse_codeberg_slug,
     resolve_origin_url,
 )
-
-from f2gh import git_source_url, resolve_clean_target, resolve_source, resolve_target
 from forgejo_to_github.github import GitHubClient, GitHubError
 
 # ---------------------------------------------------------------------------
@@ -65,13 +65,9 @@ def _ok(stdout: str = "") -> SimpleNamespace:
     return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
 
 
-def _failed(
-    returncode: int = 1, stdout: str = "", stderr: str = ""
-) -> SimpleNamespace:
+def _failed(returncode: int = 1, stdout: str = "", stderr: str = "") -> SimpleNamespace:
     """Build a failed runner result shaped like git's failure output."""
-    return SimpleNamespace(
-        returncode=returncode, stdout=stdout, stderr=stderr
-    )
+    return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 @dataclass
@@ -88,9 +84,7 @@ class _ScriptedRunner:
     )
     calls: list[tuple[list[str], dict[str, Any]]] = field(default_factory=list)
 
-    def __call__(
-        self, argv: list[str], **kwargs: Any
-    ) -> SimpleNamespace:
+    def __call__(self, argv: list[str], **kwargs: Any) -> SimpleNamespace:
         self.calls.append((list(argv), dict(kwargs)))
         value = self.routes.get(tuple(argv))
         if isinstance(value, BaseException):
@@ -319,9 +313,7 @@ def test_infer_cwd_source_outside_work_tree(
     monkeypatch.chdir(tmp_path)
     runner = _ScriptedRunner(
         routes={
-            ("git", "rev-parse", "--is-inside-work-tree"): _failed(
-                128, "false\n"
-            ),
+            ("git", "rev-parse", "--is-inside-work-tree"): _failed(128, "false\n"),
         }
     )
 
@@ -397,10 +389,7 @@ def test_infer_cwd_source_shallow_checkout(
     with pytest.raises(CwdError) as exc_info:
         infer_cwd_source(runner)
 
-    assert (
-        str(exc_info.value)
-        == "cwd is a shallow checkout; re-clone without --depth"
-    )
+    assert str(exc_info.value) == "cwd is a shallow checkout; re-clone without --depth"
     assert ("git", "config", "--get", "extensions.partialclone") not in [
         tuple(argv) for argv in runner.argvs()
     ]
@@ -418,19 +407,14 @@ def test_infer_cwd_source_partial_clone(
                 "https://codeberg.org/o/r.git\n"
             ),
             ("git", "rev-parse", "--is-shallow-repository"): _ok("false\n"),
-            ("git", "config", "--get", "extensions.partialclone"): _ok(
-                "promisor\n"
-            ),
+            ("git", "config", "--get", "extensions.partialclone"): _ok("promisor\n"),
         }
     )
 
     with pytest.raises(CwdError) as exc_info:
         infer_cwd_source(runner)
 
-    assert (
-        str(exc_info.value)
-        == "cwd is a partial clone; re-clone without --filter"
-    )
+    assert str(exc_info.value) == "cwd is a partial clone; re-clone without --filter"
 
 
 def test_infer_cwd_source_success_returns_resolved_cwd(
@@ -477,9 +461,7 @@ def test_resolve_source_explicit_passes_through_without_prompt() -> None:
 def test_resolve_source_explicit_malformed_exits_usage(source: str) -> None:
     """An explicit source that is not OWNER/REPO is a usage error."""
     with pytest.raises(SystemExit) as exc_info:
-        resolve_source(
-            _make_args(source=source), _ScriptedRunner(), _refusing_prompter
-        )
+        resolve_source(_make_args(source=source), _ScriptedRunner(), _refusing_prompter)
 
     assert exc_info.value.code == 2
 
@@ -513,7 +495,7 @@ def test_resolve_source_deny_aborts(
     with pytest.raises(SystemExit) as exc_info:
         resolve_source(_make_args(), runner, _ScriptedPrompter(response=False))
 
-    assert exc_info.value.code == 1
+    assert exc_info.value.code == 5
 
 
 def test_resolve_source_non_tty_deny_aborts(
@@ -526,7 +508,7 @@ def test_resolve_source_non_tty_deny_aborts(
     with pytest.raises(SystemExit) as exc_info:
         resolve_source(_make_args(), runner, _ScriptedPrompter(response=False))
 
-    assert exc_info.value.code == 1
+    assert exc_info.value.code == 5
 
 
 def test_resolve_source_cwd_flag_skips_prompt(
@@ -584,9 +566,7 @@ def test_resolve_source_yes_without_source_or_cwd_exits_usage() -> None:
     runner = _ScriptedRunner()
 
     with pytest.raises(SystemExit) as exc_info:
-        resolve_source(
-            _make_args(yes=True), runner, _ScriptedPrompter(response=True)
-        )
+        resolve_source(_make_args(yes=True), runner, _ScriptedPrompter(response=True))
 
     assert exc_info.value.code == 2
     assert runner.calls == []
@@ -600,9 +580,7 @@ def test_resolve_source_yes_with_cwd_flag(
     runner = _cwd_runner("https://codeberg.org/o/r.git")
     prompter = _ScriptedPrompter(response=True)
 
-    slug, cwd_source = resolve_source(
-        _make_args(yes=True, cwd=True), runner, prompter
-    )
+    slug, cwd_source = resolve_source(_make_args(yes=True, cwd=True), runner, prompter)
 
     assert slug == "o/r"
     assert cwd_source is not None
@@ -632,8 +610,7 @@ def test_resolve_target_explicit_passes_through() -> None:
     resolver = _ScriptedResolver(value="someone")
 
     assert (
-        resolve_target(_make_args(target="gh-user/r"), "o/r", resolver)
-        == "gh-user/r"
+        resolve_target(_make_args(target="gh-user/r"), "o/r", resolver) == "gh-user/r"
     )
     assert resolver.calls == []
 
@@ -641,9 +618,7 @@ def test_resolve_target_explicit_passes_through() -> None:
 def test_resolve_target_explicit_malformed_exits_usage() -> None:
     """An explicit target that is not OWNER/REPO is a usage error."""
     with pytest.raises(SystemExit) as exc_info:
-        resolve_target(
-            _make_args(target="not-a-slug"), "o/r", _ScriptedResolver()
-        )
+        resolve_target(_make_args(target="not-a-slug"), "o/r", _ScriptedResolver())
 
     assert exc_info.value.code == 2
 
@@ -787,7 +762,4 @@ def test_resolve_clean_target_cwd_with_target_stays_tokenless(
 
     monkeypatch.setattr(subprocess, "run", _forbidden_run)
 
-    assert (
-        resolve_clean_target(_make_args(cwd=True, target="gh-user/r"))
-        == "gh-user/r"
-    )
+    assert resolve_clean_target(_make_args(cwd=True, target="gh-user/r")) == "gh-user/r"

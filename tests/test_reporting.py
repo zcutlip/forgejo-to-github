@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from forgejo_to_github import reporting
 from forgejo_to_github.domain import Repository
 from forgejo_to_github.migration import MigrationOrchestrator
 from forgejo_to_github.reporting import Reporter
@@ -759,3 +760,139 @@ def test_reporter_empty_source_does_not_claim_all_migrated():
     assert "nothing to do" in text.lower(), (
         "empty-source run must mention 'nothing to do'; got:\n" + text
     )
+
+
+# --- exit_outcome exit-code mapping ------------------------------------------
+
+
+def test_exit_outcome_dry_run_returns_success_despite_failures():
+    """A dry run maps to success even when failure fields are present."""
+    reporter = Reporter(output=_Sink())
+    result: dict[str, Any] = {
+        "dry_run": True,
+        "issues_failed": 2,
+        "comments_failed": 1,
+        "git": {"clone": "failed", "push": "failed"},
+        "failures": [{"kind": "issue", "source_number": 1, "message": "boom"}],
+    }
+    assert reporter.exit_outcome(result) == reporting.EXIT_SUCCESS
+
+
+def test_exit_outcome_clean_run_with_skipped_git_returns_success():
+    """A clean run with skipped Git phases maps to success."""
+    reporter = Reporter(output=_Sink())
+    result: dict[str, Any] = {
+        "dry_run": False,
+        "issues_failed": 0,
+        "comments_failed": 0,
+        "git": {"clone": "skipped", "push": "skipped"},
+        "failures": [],
+    }
+    assert reporter.exit_outcome(result) == reporting.EXIT_SUCCESS
+    assert reporter.exit_outcome(result) == 0
+
+
+def test_exit_outcome_aborted_returns_declined():
+    """An aborted run maps to the declined exit code."""
+    assert reporting.EXIT_DECLINED == 5
+    reporter = Reporter(output=_Sink())
+    result: dict[str, Any] = {
+        "dry_run": False,
+        "aborted": True,
+        "issues_failed": 0,
+        "comments_failed": 0,
+        "git": {"clone": "ok", "push": "ok"},
+        "failures": [],
+    }
+    assert reporter.exit_outcome(result) == reporting.EXIT_DECLINED
+
+
+def test_exit_outcome_aborted_takes_precedence_over_clone_failure():
+    """An aborted run maps to declined even when the clone failed."""
+    assert reporting.EXIT_DECLINED == 5
+    reporter = Reporter(output=_Sink())
+    result: dict[str, Any] = {
+        "dry_run": False,
+        "aborted": True,
+        "issues_failed": 0,
+        "comments_failed": 0,
+        "git": {"clone": "failed", "push": "skipped"},
+        "failures": [],
+    }
+    assert reporter.exit_outcome(result) == reporting.EXIT_DECLINED
+
+
+def test_exit_outcome_clone_failure_returns_failure():
+    """A failed clone maps to the failure exit code."""
+    assert reporting.EXIT_FAILURE == 4
+    reporter = Reporter(output=_Sink())
+    result: dict[str, Any] = {
+        "dry_run": False,
+        "issues_failed": 0,
+        "comments_failed": 0,
+        "git": {"clone": "failed", "push": "skipped"},
+        "failures": [],
+    }
+    assert reporter.exit_outcome(result) == 4
+
+
+def test_exit_outcome_push_failure_returns_incomplete():
+    """A failed push with a clean clone maps to incomplete."""
+    reporter = Reporter(output=_Sink())
+    result: dict[str, Any] = {
+        "dry_run": False,
+        "issues_failed": 0,
+        "comments_failed": 0,
+        "git": {"clone": "ok", "push": "failed"},
+        "failures": [],
+    }
+    assert reporter.exit_outcome(result) == reporting.EXIT_INCOMPLETE
+
+
+def test_exit_outcome_issues_failed_returns_incomplete():
+    """A run with failed issues maps to incomplete."""
+    reporter = Reporter(output=_Sink())
+    result: dict[str, Any] = {
+        "dry_run": False,
+        "issues_failed": 1,
+        "comments_failed": 0,
+        "git": {"clone": "ok", "push": "ok"},
+        "failures": [],
+    }
+    assert reporter.exit_outcome(result) == reporting.EXIT_INCOMPLETE
+
+
+def test_exit_outcome_comments_failed_returns_incomplete():
+    """A run with failed comments maps to incomplete."""
+    reporter = Reporter(output=_Sink())
+    result: dict[str, Any] = {
+        "dry_run": False,
+        "issues_failed": 0,
+        "comments_failed": 1,
+        "git": {"clone": "ok", "push": "ok"},
+        "failures": [],
+    }
+    assert reporter.exit_outcome(result) == reporting.EXIT_INCOMPLETE
+
+
+def test_exit_outcome_failures_list_returns_incomplete():
+    """A run with a non-empty failures list maps to incomplete."""
+    reporter = Reporter(output=_Sink())
+    result: dict[str, Any] = {
+        "dry_run": False,
+        "issues_failed": 0,
+        "comments_failed": 0,
+        "git": {"clone": "ok", "push": "ok"},
+        "failures": [
+            {"kind": "issue", "source_number": 2, "message": "simulated failure"},
+        ],
+    }
+    assert reporter.exit_outcome(result) == reporting.EXIT_INCOMPLETE
+
+
+def test_reporting_exports_declined_exit_code_name():
+    """The reporting module exports the declined exit-code name."""
+    assert "EXIT_DECLINED" in reporting.__all__
+    assert "EXIT_SUCCESS" in reporting.__all__
+    assert "EXIT_INCOMPLETE" in reporting.__all__
+    assert "EXIT_FAILURE" in reporting.__all__

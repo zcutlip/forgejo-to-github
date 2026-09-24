@@ -213,6 +213,45 @@ def test_main_invokes_parse_args_then_orchestrator_flow() -> None:
     fake_reporter.exit_outcome.assert_called_once_with(sentinel_result)
 
 
+def test_main_declined_target_prompt_exits_five() -> None:
+    """A declined target-repo creation prompt aborts the run with exit 5.
+
+    Drives ``main()`` end to end with a declined pre-git run: the fake
+    orchestrator returns a result carrying ``aborted`` True, exposes no
+    ``reporter`` attribute so ``main()`` falls back to a real
+    ``Reporter``, and the real ``render_final`` + ``exit_outcome``
+    mapping decides the exit code.
+    """
+    args = argparse.Namespace(
+        source="owner/source",
+        target="owner/target",
+        dry_run=False,
+        yes=False,
+        skip_git=True,
+        public=False,
+        description=None,
+    )
+    declined_result = SimpleNamespace(
+        aborted=True,
+        dry_run=False,
+        failures=[],
+        issues_failed=0,
+        comments_failed=0,
+        git={"clone": "skipped", "push": "skipped"},
+    )
+    fake_orchestrator = SimpleNamespace(run=Mock(return_value=declined_result))
+
+    with (
+        patch.object(f2gh, "parse_args", return_value=args),
+        patch.object(f2gh, "_build_orchestrator", return_value=fake_orchestrator),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        f2gh.main()
+
+    assert declined_result.aborted is True
+    assert exc_info.value.code == 5
+
+
 def test_parse_args_returns_namespace_with_expected_attributes(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

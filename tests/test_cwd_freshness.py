@@ -21,6 +21,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from f2gh import gate_local_source
 from forgejo_to_github.cwd_source import (
     CwdSource,
     FreshnessResult,
@@ -33,8 +35,6 @@ from forgejo_to_github.cwd_source import (
     ref_contains,
     remote_ref_tips,
 )
-
-from f2gh import gate_local_source
 
 ORIGIN_URL = "https://codeberg.org/o/r.git"
 CWD_PATH = "/tmp/work/checkout"
@@ -57,13 +57,9 @@ def _ok(stdout: str = "") -> SimpleNamespace:
     return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
 
 
-def _failed(
-    returncode: int = 1, stdout: str = "", stderr: str = ""
-) -> SimpleNamespace:
+def _failed(returncode: int = 1, stdout: str = "", stderr: str = "") -> SimpleNamespace:
     """Build a failed runner result shaped like git's failure output."""
-    return SimpleNamespace(
-        returncode=returncode, stdout=stdout, stderr=stderr
-    )
+    return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 @dataclass
@@ -217,8 +213,7 @@ def test_remote_ref_tips_parses_ls_remote_stdout() -> None:
     runner = _ScriptedRunner(
         routes={
             ("git", "ls-remote", ORIGIN_URL): _ok(
-                f"{MAIN_REMOTE}\trefs/heads/main\n"
-                f"{TAG_V13}\trefs/tags/v1.3\n"
+                f"{MAIN_REMOTE}\trefs/heads/main\n{TAG_V13}\trefs/tags/v1.3\n"
             ),
         }
     )
@@ -234,9 +229,7 @@ def test_remote_ref_tips_parses_ls_remote_stdout() -> None:
 
 def test_remote_ref_tips_sends_no_prompt_ssh_env() -> None:
     """The remote probe fails fast instead of blocking on credentials."""
-    runner = _ScriptedRunner(
-        routes={("git", "ls-remote", ORIGIN_URL): _ok("")}
-    )
+    runner = _ScriptedRunner(routes={("git", "ls-remote", ORIGIN_URL): _ok("")})
 
     remote_ref_tips(runner, ORIGIN_URL)
 
@@ -290,8 +283,7 @@ def test_local_ref_map_parses_show_ref_output() -> None:
     runner = _ScriptedRunner(
         routes={
             ("git", "show-ref"): _ok(
-                f"{MAIN_LOCAL} refs/heads/main\n"
-                f"{TAG_V13} refs/tags/v1.3\n"
+                f"{MAIN_LOCAL} refs/heads/main\n{TAG_V13} refs/tags/v1.3\n"
             ),
         }
     )
@@ -331,9 +323,7 @@ def test_local_ref_map_empty_when_no_refs() -> None:
 def test_ref_contains_true_on_zero_return() -> None:
     """``merge-base --is-ancestor`` exit 0 means the tip is contained."""
     runner = _ScriptedRunner(
-        routes={
-            ("git", "merge-base", "--is-ancestor", MAIN_REMOTE, MAIN_LOCAL): _ok()
-        }
+        routes={("git", "merge-base", "--is-ancestor", MAIN_REMOTE, MAIN_LOCAL): _ok()}
     )
 
     assert ref_contains(runner, MAIN_REMOTE, MAIN_LOCAL) is True
@@ -362,9 +352,7 @@ def test_ref_contains_false_on_nonzero_return() -> None:
 def test_ref_contains_passes_no_env() -> None:
     """Local containment checks run without the remote probe env."""
     runner = _ScriptedRunner(
-        routes={
-            ("git", "merge-base", "--is-ancestor", MAIN_REMOTE, MAIN_LOCAL): _ok()
-        }
+        routes={("git", "merge-base", "--is-ancestor", MAIN_REMOTE, MAIN_LOCAL): _ok()}
     )
 
     ref_contains(runner, MAIN_REMOTE, MAIN_LOCAL)
@@ -425,9 +413,7 @@ def test_check_freshness_behind_when_remote_tip_unknown() -> None:
     """A remote tip present nowhere locally lands in ``behind``."""
     remote = [f"{FEATURE_REMOTE}\trefs/heads/main"]
     local = [f"{MAIN_LOCAL} refs/heads/main"]
-    runner = _freshness_runner(
-        remote, local, merge_base_rc={FEATURE_REMOTE: 1}
-    )
+    runner = _freshness_runner(remote, local, merge_base_rc={FEATURE_REMOTE: 1})
 
     result = check_freshness(runner, ORIGIN_URL)
 
@@ -533,9 +519,7 @@ def test_check_freshness_local_only_refs_announce_only() -> None:
 def test_check_freshness_probe_failure_continues_without_prompt() -> None:
     """A failed remote probe yields ``probe_failed`` and empty lists."""
     _, local = _clean_lines()
-    runner = _freshness_runner(
-        [], local, ls_remote_rc=128
-    )
+    runner = _freshness_runner([], local, ls_remote_rc=128)
 
     result = check_freshness(runner, ORIGIN_URL)
 
@@ -671,21 +655,19 @@ def test_format_local_only_notice_lists_names() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_gate_deny_aborts_with_exit_1(
+def test_gate_deny_aborts_with_exit_5(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Declining the unified prompt aborts before anything mutates."""
     remote = [f"{FEATURE_REMOTE}\trefs/heads/main"]
     local = [f"{MAIN_LOCAL} refs/heads/main"]
-    runner = _freshness_runner(
-        remote, local, merge_base_rc={FEATURE_REMOTE: 1}
-    )
+    runner = _freshness_runner(remote, local, merge_base_rc={FEATURE_REMOTE: 1})
     prompter = _ScriptedPrompter(response=False)
 
     with pytest.raises(SystemExit) as exc_info:
         gate_local_source(runner, _make_cwd(), prompter)
 
-    assert exc_info.value.code == 1
+    assert exc_info.value.code == 5
     assert len(prompter.prompts) == 1
     assert "migrate local state anyway?" in prompter.prompts[0]
     out = capsys.readouterr().out
@@ -700,9 +682,7 @@ def test_gate_accept_returns_result(
     """Accepting the unified prompt returns the freshness result."""
     remote = [f"{FEATURE_REMOTE}\trefs/heads/main"]
     local = [f"{MAIN_LOCAL} refs/heads/main"]
-    runner = _freshness_runner(
-        remote, local, merge_base_rc={FEATURE_REMOTE: 1}
-    )
+    runner = _freshness_runner(remote, local, merge_base_rc={FEATURE_REMOTE: 1})
     prompter = _ScriptedPrompter(response=True)
 
     result = gate_local_source(runner, _make_cwd(), prompter)
@@ -719,16 +699,12 @@ def test_gate_non_tty_deny_aborts() -> None:
     """A non-tty EOF deny (prompter False) aborts like an explicit No."""
     remote = [f"{FEATURE_REMOTE}\trefs/heads/main"]
     local = [f"{MAIN_LOCAL} refs/heads/main"]
-    runner = _freshness_runner(
-        remote, local, merge_base_rc={FEATURE_REMOTE: 1}
-    )
+    runner = _freshness_runner(remote, local, merge_base_rc={FEATURE_REMOTE: 1})
 
     with pytest.raises(SystemExit) as exc_info:
-        gate_local_source(
-            runner, _make_cwd(), _ScriptedPrompter(response=False)
-        )
+        gate_local_source(runner, _make_cwd(), _ScriptedPrompter(response=False))
 
-    assert exc_info.value.code == 1
+    assert exc_info.value.code == 5
 
 
 def test_gate_announce_path_skips_prompter_and_prints_notice(
@@ -836,18 +812,14 @@ def test_has_uncommitted_changes_true_when_output() -> None:
 
 def test_has_uncommitted_changes_false_when_empty() -> None:
     """Empty ``status --porcelain`` output means clean."""
-    runner = _ScriptedRunner(
-        routes={("git", "status", "--porcelain"): _ok("")}
-    )
+    runner = _ScriptedRunner(routes={("git", "status", "--porcelain"): _ok("")})
 
     assert has_uncommitted_changes(runner) is False
 
 
 def test_has_uncommitted_changes_passes_no_env() -> None:
     """The dirt probe is local-only, so it sends no env."""
-    runner = _ScriptedRunner(
-        routes={("git", "status", "--porcelain"): _ok("")}
-    )
+    runner = _ScriptedRunner(routes={("git", "status", "--porcelain"): _ok("")})
 
     has_uncommitted_changes(runner)
 
