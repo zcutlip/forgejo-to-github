@@ -111,7 +111,7 @@ push succeeds.
 | `--target OWNER/REPO` | Target repo on GitHub (default: `<github-account>/<repo>`) |
 | `--cwd` | Source the migration from the current checkout; skips the inference prompt |
 | `--dry-run` | Preview without making changes |
-| `--yes` | Skip confirmation prompts. Requires explicit `--source` and `--target`, and accepts a stale-checkout warning without asking |
+| `--yes` | Skip confirmation prompts. Requires explicit `--source` and `--target`, and accepts the stale-checkout confirmation without asking |
 | `--skip-git` | Skip the git mirror; migrate issues only |
 | `--public` | Create the target repo public (default: private) |
 | `--description TEXT` | Repo description on GitHub (default: copied from Codeberg, fallback "Migrated from Codeberg") |
@@ -123,7 +123,7 @@ push succeeds.
 
 | Code | Meaning |
 |---|---|
-| `0` | Migration finished with nothing left to do |
+| `0` | Migration finished with nothing left to do. A dry run always exits `0` when discovery succeeded, whatever the plan contains |
 | `1` | Migration ran but something was incomplete — issues or comments failed, or the push failed |
 | `2` | The invocation was invalid — bad flags, or a working directory that failed the checks above |
 | `3` | The checkpoint could not be locked or written, so the run stopped before mutating anything |
