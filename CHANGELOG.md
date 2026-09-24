@@ -2,6 +2,8 @@
 
 All notable changes to `f2gh` are documented here.
 
+Changes to exit-status contracts are recorded under `Changed`.
+
 ## [Unreleased]
 
 ### Added
@@ -18,11 +20,11 @@ All notable changes to `f2gh` are documented here.
 
 - Failed clones now exit with status `4` instead of sharing status `2` with invalid invocations.
 - Declined confirmations now exit with status `5` instead of `1` (or `0` for the target-repository prompt).
+- Interrupted migrations now exit with status `130` after printing a clean message instead of a traceback.
 
 ### Fixed
 
 - Handle `Ctrl+C` cleanly when interruption occurs before state-path resolution.
-- Exit with status `130` for interrupted migrations without printing a traceback.
 
 ## [1.3.0] - 2026-09-17
 
