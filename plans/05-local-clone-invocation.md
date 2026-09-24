@@ -195,6 +195,39 @@ pre-flight plan (#16); this notice only ensures the user is told.
 - Semantics (documented): local sourcing migrates your *local* state, which
   may differ from Codeberg's.
 
+### 9. Exit codes (locked)
+
+Every code maps to exactly one outcome. Two collisions are collapsed: the
+pre-existing `2` shared by usage errors and a failed clone, and the `1` that
+this feature's decline paths would otherwise share with an incomplete run.
+
+| Code | Outcome |
+|---|---|
+| `0` | Success (and dry-run) |
+| `1` | Incomplete — push failed, or some issues/comments failed |
+| `2` | Usage error — bad flags, or a failed cwd check. argparse hardcodes `2`, so usage keeps it and the clone code moves |
+| `3` | State lock/write error (`EXIT_STATE_ERROR`, unchanged) |
+| `4` | Clone failed — terminal, nothing else ran (`EXIT_FAILURE`, moved from `2`) |
+| `5` | Declined by user (`EXIT_DECLINED`, new) |
+| `130` | Interrupted (`EXIT_INTERRUPTED`, unchanged) |
+
+- Clone failure stays distinct from `1` because it is terminal *before*
+  anything migrates, while a push failure still migrates issues — a script
+  can act differently on the two.
+- `Reporter.exit_outcome` consults `result.aborted` immediately after the
+  dry-run branch and returns `5`. Both abort sites are in `_prepare_target`,
+  upstream of the git phase, so a decline can never mask partial work.
+- **Stale tests this changes** (amend in RED, do not leave contradicting):
+  - `tests/test_cwd_source.py::test_resolve_source_deny_aborts`
+  - `tests/test_cwd_source.py::test_resolve_source_non_tty_deny_aborts`
+  - `tests/test_cwd_freshness.py::test_gate_deny_aborts_with_exit_1` —
+    renamed as well as re-asserted, since the name encodes the old code
+    (`test_gate_deny_aborts_with_exit_5`)
+  - `tests/test_cwd_freshness.py::test_gate_non_tty_deny_aborts`
+
+  All four assert `code == 1` today.
+- `README.md`'s exit-code table and `CHANGELOG.md` move with the change.
+
 ## Explicitly dropped
 
 - **B-direct** (push `--all`/`--tags` straight from cwd, no clone):
@@ -280,6 +313,12 @@ simplifies its future detection (known rather than detected) instead of the
 - `--clean` without `--target` → exit 2 (plain, `--cwd`, and `--dry-run`
   forms); `--clean --cwd --target X` stays tokenless (no token read, no
   network); explicit `--clean --source X --target Y` unchanged.
+- **Exit-code mapping (§9)**, driving `Reporter.exit_outcome` directly —
+  this mapping has no test today, since the CLI flow tests mock the
+  reporter: dry-run → `0`; clean → `0`; `aborted` → `5`; clone failed →
+  `4`; push failed → `1`; issues failed → `1`; comments failed → `1`.
+  Plus one end-to-end CLI case: a denied create-repo prompt exits `5`
+  (today it exits `0`).
 - Existing explicit-invocation suite passes unchanged.
 
 ## References
@@ -288,5 +327,10 @@ simplifies its future detection (known rather than detected) instead of the
 - Plans `04-retain-clone-cache.md` (#5 — the cache flow reused verbatim)
 - Audit `05-local-clone-invocation-audit.md` (findings 1–8, A–B folded in)
 - #16 — single pre-flight plan (expectation-setting and informed consent).
+- **Deliberate deviation:** `plans/archive/02-package-refactor-and-test-foundation/refactor/05-reporter.md`
+  pins `EXIT_INCOMPLETE (1)` / `EXIT_FAILURE (2)`. §9 keeps `1` and moves
+  `EXIT_FAILURE` to `4` so usage errors keep argparse's `2`. Accepted here:
+  the codes are CLI surface, not architecture, and no consumer depends on
+  them yet.
   The uncommitted-changes notice here is informational only; consent lives
   there. #16 also absorbs the former #12 (stale-checkpoint detection/reset).
