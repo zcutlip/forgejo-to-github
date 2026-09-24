@@ -18,7 +18,8 @@ from typing import Protocol, cast
 
 EXIT_SUCCESS: int = 0
 EXIT_INCOMPLETE: int = 1
-EXIT_FAILURE: int = 2
+EXIT_FAILURE: int = 4  # terminal clone failure
+EXIT_DECLINED: int = 5  # user-declined outcome
 
 
 class Sink(Protocol):
@@ -377,6 +378,9 @@ class Reporter:
         dry_run = _get_field(result, "dry_run", False)
         if dry_run:
             return EXIT_SUCCESS
+        aborted = _get_field(result, "aborted", False)
+        if aborted:
+            return EXIT_DECLINED
         git = _get_field(result, "git", {"clone": "skipped", "push": "skipped"})
         if not isinstance(git, dict):
             git = {"clone": "skipped", "push": "skipped"}
@@ -410,6 +414,7 @@ def _get_field(obj: object, name: str, default: object) -> object:
 
 
 __all__ = [
+    "EXIT_DECLINED",
     "EXIT_FAILURE",
     "EXIT_INCOMPLETE",
     "EXIT_SUCCESS",

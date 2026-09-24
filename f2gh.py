@@ -32,7 +32,7 @@ from forgejo_to_github.paths import (
     default_state_base,
     state_path_for,
 )
-from forgejo_to_github.reporting import Reporter
+from forgejo_to_github.reporting import EXIT_DECLINED, Reporter
 from forgejo_to_github.state import (
     StateLockedError,
     StateStore,
@@ -45,6 +45,9 @@ EXIT_INTERRUPTED = 130
 
 # State-path refusal (preflight could not establish the state file).
 EXIT_STATE_ERROR = 3
+
+# User-declined prompt — single source of truth is reporting.EXIT_DECLINED
+# (imported above); listed here so every exit code stays visible in one block.
 
 
 def parse_args() -> argparse.Namespace:
@@ -205,7 +208,7 @@ def resolve_source(
     An explicit ``--source`` is shape-validated and passes through with
     no cwd probing and no prompt. An omitted source is inferred from the
     current checkout behind a single confirm prompt naming the slug and
-    path (declining aborts with exit 1); ``--cwd`` expresses that intent
+    path (declining aborts with exit 5); ``--cwd`` expresses that intent
     up front and skips the prompt. ``--cwd`` combined with an explicit
     source must agree with the inference (mismatch is a usage error,
     exit 2). ``--yes`` cannot confirm an inference that never happens,
@@ -240,7 +243,7 @@ def resolve_source(
     prompt = f"Inferred source {inferred.slug} from {inferred.path} — proceed?"
     if not prompter(prompt):
         print("Aborted.", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(EXIT_DECLINED)
     return inferred.slug, inferred
 
 
@@ -315,7 +318,7 @@ def gate_local_source(
     migration). A failed freshness probe warns on stderr and proceeds
     with no prompt. Otherwise a stale result (behind, divergent,
     missing, or moved refs) prompts once via the prompter seam
-    (declining aborts with exit 1); a fresh result only announces
+    (declining aborts with exit 5); a fresh result only announces
     local-only refs that will migrate. Returns the freshness result.
     """
     print(
@@ -337,7 +340,7 @@ def gate_local_source(
             prompt = "migrate local state anyway?"
         if not prompter(prompt):
             print("Aborted.", file=sys.stderr)
-            raise SystemExit(1)
+            raise SystemExit(EXIT_DECLINED)
         return freshness
     notice = format_local_only_notice(freshness)
     if notice is not None:
