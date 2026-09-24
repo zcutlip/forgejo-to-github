@@ -44,7 +44,8 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
 - All tests **must** be run via `./scripts/run-tests.sh [pytest args...]`. The script handles virtualenv selection and activation, then passes all arguments through to `pytest`.
 - Before submitting PRs or finalizing changes, run:
   - `./scripts/run-tests.sh` for unit/integration test validation.
-  - `ruff check .` and `mypy f2gh.py forgejo_to_github/` for static analysis and type safety.
+  - `mypy f2gh.py forgejo_to_github/` for type safety.
+- **Lint and format are the lint-format skill's remit**, not a command to hand-run: the skill's `fix` operation is authoritative for both linting and formatting, and a delegate (`@lint`) owns it. Do not invoke `ruff` directly, and do not judge the tree by `ruff check` alone — it reports lint only, while `fix` also formats, so a check-clean tree can still be reformatted.
 - Test external API integrations using mocked responses (`responses` or `unittest.mock`) to avoid hitting live APIs during routine test suite runs.
 - When a persisted schema keeps or gains a field, require a test asserting its producer-driven value, not just its store round-trip. A store that faithfully persists whatever it is handed still passes when the producer hands it the wrong value; only an end-to-end assertion through the producing code path catches that.
 
@@ -140,10 +141,9 @@ pip install -e .   # editable install → `f2gh` command (or `pipx install .`)
 # Run migration in dry-run mode
 f2gh --source owner/repo --target owner/repo --dry-run
 # (no-install fallback: ./f2gh.py --source owner/repo --target owner/repo --dry-run)
-
-# Run linter
-ruff check .
 ```
+
+Lint and format are delegated to `@lint` (who uses the lint-format skill) — never hand-run `ruff`. Never tell `@lint` how to do its job. Scope-defining input only.
 
 ### Releases
 
