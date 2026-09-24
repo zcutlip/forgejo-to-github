@@ -14,6 +14,11 @@ All notable changes to `f2gh` are documented here.
 - Support `--cwd` for selecting the local checkout used as the migration source.
 - Ensure `--yes` covers all migration confirmations.
 
+### Changed
+
+- Failed clones now exit with status `4` instead of sharing status `2` with invalid invocations.
+- Declined confirmations now exit with status `5` instead of `1` (or `0` for the target-repository prompt).
+
 ### Fixed
 
 - Handle `Ctrl+C` cleanly when interruption occurs before state-path resolution.
