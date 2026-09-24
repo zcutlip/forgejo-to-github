@@ -124,13 +124,12 @@ push succeeds.
 | Code | Meaning |
 |---|---|
 | `0` | Migration finished with nothing left to do |
-| `1` | Migration ran but something was incomplete — issues or comments failed, or the push failed. Also returned when you decline the source-inference or stale-checkout confirmation |
-| `2` | The clone failed, or the invocation was invalid — bad flags, or a working directory that failed the checks above |
+| `1` | Migration ran but something was incomplete — issues or comments failed, or the push failed |
+| `2` | The invocation was invalid — bad flags, or a working directory that failed the checks above |
 | `3` | The checkpoint could not be locked or written, so the run stopped before mutating anything |
+| `4` | The clone failed, so nothing else ran |
+| `5` | Declined — you answered no to a confirmation prompt |
 | `130` | Interrupted with Ctrl+C. The checkpoint is saved and the resume command is printed |
-
-Because a declined create-repo prompt is treated as a clean stop, `0` can also
-mean "declined" for that particular prompt.
 
 ## Development
 
