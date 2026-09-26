@@ -2,7 +2,7 @@
 
 **GitHub issue:** none — work is done directly in this tree.
 **Branch:** current working branch.
-**Status:** RED reopened — amending the locked tests for explicit bump levels, untracked-file rejection, deterministic recovery, status output, rebase order, and harness progress. No GREEN implementation changes yet.
+**Status:** complete — implemented, verified, and committed in both trees.
 
 ## Context
 
@@ -224,7 +224,7 @@ It must cover:
 - no fetch behavior for `release`;
 - no push or remote-release behavior.
 
-No GREEN implementation changes begin until these RED amendments are approved and committed, and their failures are established for the contract reason.
+These tests were written and locked before implementation, then amended twice under RED approval (directory-aware branch assertions; explicit bump levels, untracked-file rejection, deterministic recovery, `status` output, rebase-before-promotion, and harness progress). No test was changed to make an implementation pass.
 
 ## Out of scope
 
@@ -232,11 +232,26 @@ No GREEN implementation changes begin until these RED amendments are approved an
 
 ## Verification
 
-- new shared workflow tests;
-- `pre-commit run --all-files` in `repo-mgmt-scripts`;
-- `./scripts/run-tests.sh` in `forgejo-to-github`;
-- `ruff check .`;
-- `mypy f2gh.py forgejo_to_github/`.
+- `repo-mgmt-scripts` lifecycle harness: 87 passed, 0 failed;
+- `./scripts/run-tests.sh` in `forgejo-to-github`: 390 passed;
+- `mypy f2gh.py forgejo_to_github/`: no issues in 15 source files;
+- lint and format over the changed shell files via the lint-format skill;
+- `scripts/issue-branch status` exercised through the project symlink against this project's own `project_settings.sh`.
+
+## Delivered
+
+Shared submodule (`repo-mgmt-scripts`):
+
+- `src/issue-branch` — the lifecycle command;
+- `tests/test_issue_branch` — the throwaway-repo shell harness;
+- `install` — symlinks `issue-branch` alongside the other commands.
+
+`forgejo-to-github`:
+
+- `scripts/issue-branch` — tracked symlink into the submodule;
+- `scripts/project_settings.sh` — `ISSUE_BRANCH_TEMPLATE`, `ISSUE_BRANCH_BASE`, `ISSUE_BRANCH_TEST_COMMAND`, `ISSUE_BRANCH_CHANGELOG`;
+- `AGENTS.md` — branch-workflow, agent-policy, and release documentation;
+- `README.md` — `## Issue branch workflow` section.
 
 ## References
 
