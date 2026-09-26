@@ -2,7 +2,7 @@
 
 **GitHub issue:** none — closing work for the current branch, no new issue filed.
 **Branch:** `dev/6-local-clone-invocation` (current; no new branch).
-**Status:** stage 1 — plan written, awaiting approval. No test or code changes yet.
+**Status:** stage 1 approved and committed. RED not yet started.
 **Source:** `plans/10-test-audit-2026-09-26.md` (the audit report, left unmodified).
 
 ## Context
@@ -28,7 +28,8 @@ immediately. That inverts the normal gate:
 
 > A failing amended test is **not** a test bug to be resolved by loosening the
 > new assertion. It is evidence that a vacuous test was masking a live
-> production defect. Surface it, stop, and treat it as its own piece of work.
+> production defect. Surface it and stop. That finding is what makes GREEN real
+> for this effort — and fixing it still requires its own approval.
 
 Do not weaken a strengthened assertion to reach green. The only acceptable
 response to a failure is to report it.
@@ -199,7 +200,7 @@ sign-off, separate from the rest of the plan.
 ## Test contract (amendments, not new RED)
 
 All eight items are amendments to existing tests; no new behavior is specified,
-so no production change is expected. Applied in stage 2.
+so no production change is expected. All eight are applied in RED.
 
 1. `tests/test_package_boundaries.py` — both import-side-effect tests run in a
    fresh child process **and** walk-and-import every submodule; the false
@@ -223,28 +224,35 @@ so no production change is expected. Applied in stage 2.
   delta being exactly the two Group D deletions.
 - `mypy f2gh.py forgejo_to_github/` — clean. No production code is touched, so
   this is a guard against test edits tripping the checker, not a target.
-- Lint and format are delegated to `@lint`, at this gate and at the next one.
-  Never hand-run `ruff`.
+- Lint and format are delegated to `@lint`, at the RED gate and again at GREEN
+  if it becomes real. Never hand-run `ruff`.
 
 ## Out of scope
 
 - **Editing `plans/10-test-audit-2026-09-26.md`.** It stays as the audit record.
   The corrections live in this plan's "Report provenance" section.
-- Production changes. None are expected; the guarded behavior is already correct
-  per the table above. A failure here means the premise was wrong, which is a
-  finding, not a task.
+- Production changes **during RED**. None are expected; the guarded behavior is
+  already correct per the table above. If an amendment fails, that is a finding
+  about production: it makes GREEN real, and it is fixed only under GREEN's own
+  approval.
 - Coverage-gap analysis. The audit explicitly excluded it and this plan does not
   open it.
 - New GitHub issues, new branches, and any remote operation.
 
 ## Staging
 
-1. **Stage 1 (this document).** Stop for review.
-2. **Stage 2.** Apply Groups A-D as the eight amendments above, run the
-   verification suite, stop for review.
-3. **Stage 3.** Only if something actually failed — which per the governing
-   rule means a production defect surfaced, and is its own conversation rather
-   than a continuation of this plan.
+This is a test-remediation-only effort, so the sequence is RED and then, in the
+ordinary case, nothing.
+
+1. **RED.** Apply Groups A-D as the eight amendments above and run the
+   verification suite. Report what passed and what did not. No production code is
+   touched in this stage.
+2. **Exit from RED** is the user approving and committing the updated tests. The
+   agent does not declare this stage exited.
+3. **GREEN is a no-op by default.** Every guarded behavior is already verified
+   correct, so there is nothing to implement. It becomes real only if
+   remediating the tests surfaces an actual implementation issue — and then only
+   after its own approval.
 
 ## References
 
