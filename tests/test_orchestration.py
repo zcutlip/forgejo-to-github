@@ -63,6 +63,40 @@ class _FakeRepo:
         self.target = target
 
 
+class _Timeline:
+    """One ordered log of every seam event, shared by the injected fakes.
+
+    Ordering assertions need a single sequence, not three. ``api.calls`` and
+    ``state.events`` are independent lists, so an index into one and an index
+    into the other are positions in different sequences and cannot establish
+    which event came first -- comparing them is meaningless, not merely
+    fragile. Each fake appends ``(collaborator, kind, *payload)`` here, and
+    ordering assertions compare positions within this one log.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[tuple[Any, ...]] = []
+
+    def record(self, collaborator: str, kind: str, *payload: Any) -> None:
+        """Append one seam event. ``collaborator`` is api/git/state."""
+        self.events.append((collaborator, kind, *payload))
+
+    def index_of(self, collaborator: str, kind: str, *payload: Any) -> int:
+        """Position of the first event matching the given coordinates.
+
+        Raises ``AssertionError`` when there is no such event, so a missing
+        event reads as a failed ordering claim rather than a ``StopIteration``
+        escaping from an iterator.
+        """
+        target = (collaborator, kind, *payload)
+        for position, event in enumerate(self.events):
+            if event == target:
+                return position
+        raise AssertionError(
+            f"no {target!r} event on the timeline; recorded: {self.events!r}"
+        )
+
+
 class _FakeApi:
     """Records calls to the API client and yields canned issue payloads.
 
@@ -70,6 +104,9 @@ class _FakeApi:
     to verify the order in which the orchestrator reached for the API and
     a way to inject a per-issue failure on demand. It is intentionally
     not a faithful re-implementation of the real Codeberg/GitHub clients.
+
+    Every call is mirrored onto the shared ``timeline`` so ordering can be
+    asserted across seams, not just within the API.
 
     Approved API-alignment: ``create_issue``/``create_comment`` now match
     the concrete ``GitHubClient`` signatures ``(title, body, labels)->int``
@@ -85,6 +122,7 @@ class _FakeApi:
     ) -> None:
         self.issues = list(issues or [])
         self.calls: list[tuple[str, ...]] = []
+        self.timeline = _Timeline()
         self._fail_issue_numbers: set[int] = set()
         self._fail_comment_keys: set[tuple[int, int]] = set()
         self._github_to_source: dict[int, int] = {}
@@ -94,12 +132,27 @@ class _FakeApi:
         )
         self._fail_list_comments_numbers: set[int] = set()
 
+    def _note(self, call: tuple[str, ...]) -> None:
+        """Record a call on the call log and mirror it onto the timeline."""
+        self.calls.append(call)
+        self.timeline.record("api", *call)
+
+    def record(self, *call: Any) -> None:
+        """Record a call driven by a test rather than by the orchestrator.
+
+        Some tests poke a seam directly. Those calls must go through here
+        rather than a bare ``calls.append`` so the timeline stays gap-free:
+        a call that never reaches the timeline is invisible to an ordering
+        assertion, which is the failure mode this log exists to prevent.
+        """
+        self._note(tuple(call))
+
     def list_issues(self) -> list[dict[str, Any]]:
-        self.calls.append(("list_issues",))
+        self._note(("list_issues",))
         return list(self.issues)
 
     def list_comments(self, issue_id: int) -> list[dict[str, Any]]:
-        self.calls.append(("list_comments", str(int(issue_id))))
+        self._note(("list_comments", str(int(issue_id))))
         if int(issue_id) in self._fail_list_comments_numbers:
             raise RuntimeError(f"simulated list_comments failure for {issue_id}")
         return list(self.comments_by_issue.get(int(issue_id), []))
@@ -109,7 +162,7 @@ class _FakeApi:
         source_number = (
             int(self.issues[idx]["number"]) if idx < len(self.issues) else idx + 1
         )
-        self.calls.append(("create_issue", str(source_number)))
+        self._note(("create_issue", str(source_number)))
         if source_number in self._fail_issue_numbers:
             raise RuntimeError(f"simulated create_issue failure for {source_number}")
         github_number = 100 + source_number
@@ -121,7 +174,7 @@ class _FakeApi:
             int(github_number), int(github_number) - 100
         )
         comment_index = self._comment_counters.get(int(github_number), 0)
-        self.calls.append(("create_comment", str(source_number), str(comment_index)))
+        self._note(("create_comment", str(source_number), str(comment_index)))
         key = (source_number, comment_index)
         self._comment_counters[int(github_number)] = comment_index + 1
         if key in self._fail_comment_keys:
@@ -171,14 +224,17 @@ class _FakeGit:
         self.push_called = False
         self.clone_error: Exception | None = None
         self.push_error: Exception | None = None
+        self.timeline = _Timeline()
 
     def run_clone(self) -> None:
         self.clone_called = True
+        self.timeline.record("git", "clone")
         if self.clone_error is not None:
             raise self.clone_error
 
     def run_push(self) -> None:
         self.push_called = True
+        self.timeline.record("git", "push")
         if self.push_error is not None:
             raise self.push_error
 
@@ -193,9 +249,12 @@ class _FakeState:
 
     def __init__(self, migrated: dict[int, int] | None = None) -> None:
         self.events: list[tuple[str, int, int | None]] = []
+        self.timeline = _Timeline()
         # Prepopulated resume checkpoint: each entry seeds an ("issue",
         # ...) event so already_migrated() reports it without any run
-        # having occurred.
+        # having occurred. Seeding is state, not an ordered occurrence, so
+        # it deliberately does not reach the timeline -- otherwise a resumed
+        # run would appear to checkpoint an issue before doing any work.
         for source_number, github_number in dict(migrated or {}).items():
             self.events.append(("issue", int(source_number), int(github_number)))
         # Record-only StateStore.save seam: the (repo_created,
@@ -207,11 +266,13 @@ class _FakeState:
 
     def record_issue(self, source_number: int, github_number: int) -> None:
         self.events.append(("issue", int(source_number), int(github_number)))
+        self.timeline.record("state", "issue", int(source_number))
 
     def record_comment(
         self, source_number: int, comment_index: int, github_comment_id: int
     ) -> None:
         self.events.append(("comment", int(source_number), int(comment_index)))
+        self.timeline.record("state", "comment", int(source_number), int(comment_index))
 
     def already_migrated(self, source_number: int) -> bool:
         for kind, src, _dst in self.events:
@@ -286,26 +347,35 @@ def _build(
     """Construct an orchestrator with the standard set of fakes.
 
     Returns the orchestrator together with the dictionary of fakes so
-    that each test can poke at the right seam.
+    that each test can poke at the right seam. The three event-producing
+    fakes are bound to one shared ``timeline``, also returned in that
+    dictionary, so a test can assert ordering *across* seams rather than
+    only within one. Fakes constructed outside this helper carry their own
+    timeline by default and are unaffected.
     """
     repo: Any = _FakeRepo("owner/source", "owner/target")
-    api = api if api is not None else _FakeApi(issues)
-    git = git if git is not None else _FakeGit()
-    state = state if state is not None else _FakeState()
-    report = report if report is not None else _FakeReport()
+    api_seam: Any = api if api is not None else _FakeApi(issues)
+    git_seam: Any = git if git is not None else _FakeGit()
+    state_seam: Any = state if state is not None else _FakeState()
+    report_seam: Any = report if report is not None else _FakeReport()
+    timeline = _Timeline()
+    api_seam.timeline = timeline
+    git_seam.timeline = timeline
+    state_seam.timeline = timeline
     orchestrator = MigrationOrchestrator(
         repo=repo,
-        api=api,
-        git=git,
-        state=state,
-        report=report,
+        api=api_seam,
+        git=git_seam,
+        state=state_seam,
+        report=report_seam,
     )
     return orchestrator, {
         "repo": repo,
-        "api": api,
-        "git": git,
-        "state": state,
-        "report": report,
+        "api": api_seam,
+        "git": git_seam,
+        "state": state_seam,
+        "report": report_seam,
+        "timeline": timeline,
     }
 
 
@@ -340,17 +410,31 @@ def test_clone_runs_before_any_issue_work():
     state = _FakeState()
     report = _FakeReport()
 
-    orch, _fakes = _build(api=api, git=git, state=state, report=report)
+    orch, fakes = _build(api=api, git=git, state=state, report=report)
 
     orch.run()
+    timeline: _Timeline = fakes["timeline"]
 
-    # The first API call must be a list, never a create.
+    # The ordering claim itself, on the one shared timeline. Asserting only
+    # that the first API call is a list -- which the test also does -- cannot
+    # distinguish "cloned, then listed" from "listed, then cloned"; both put
+    # list_issues first among API calls. Only a cross-seam position can.
+    clone_index = timeline.index_of("git", "clone")
+    first_list_index = timeline.index_of("api", "list_issues")
+    assert clone_index < first_list_index, (
+        "clone must precede the first issue-related API call; "
+        f"timeline={timeline.events!r}"
+    )
+
+    # Kept alongside it: the first API call must be a list, never a create.
+    # The ordering check above does not imply this -- a create before the
+    # list would still leave clone ahead of list_issues.
     assert api.calls, "orchestrator must reach the API"
     assert api.calls[0][0] == "list_issues", (
-        f"clone must precede the first issue-related API call; got {api.calls[0]!r}"
+        f"the first API call must be a list; got {api.calls[0]!r}"
     )
     assert git.clone_called is True
-    # And clone must precede any issue work in the timeline of events.
+    # And at least one issue must actually have been checkpointed.
     assert any(kind == "issue" for kind, *_ in state.events)
 
 
@@ -448,30 +532,26 @@ def test_create_issue_runs_before_comments_and_checkpoint():
     state = _FakeState()
     report = _FakeReport()
 
-    orch, _fakes = _build(api=api, state=state, report=report)
+    orch, fakes = _build(api=api, state=state, report=report)
 
     orch.run()
+    timeline: _Timeline = fakes["timeline"]
 
-    # For issue 1, create must come before any of its comments.
-    create_index = next(
-        i for i, c in enumerate(api.calls) if c[0] == "create_issue" and c[1] == "1"
-    )
-    comment_indices = [
-        i for i, c in enumerate(api.calls) if c[0] == "create_comment" and c[1] == "1"
-    ]
-    assert comment_indices, "expected comments to be posted for issue 1"
-    assert create_index < min(comment_indices), (
+    # Both claims are positions in the one shared timeline. The previous
+    # checkpoint assertion compared an index into api.calls with an index
+    # into state.events -- positions in two independent lists, which cannot
+    # establish which came first.
+    create_index = timeline.index_of("api", "create_issue", "1")
+    first_comment_index = timeline.index_of("api", "create_comment", "1", "0")
+    checkpoint_index = timeline.index_of("state", "issue", 1)
+
+    assert create_index < first_comment_index, (
         "issue creation must precede comment posting for the same issue; "
-        f"create_index={create_index}, comment_indices={comment_indices}"
+        f"timeline={timeline.events!r}"
     )
-
-    # Checkpoint for issue 1 must occur after its create call.
-    issue1_checkpoint = next(
-        i for i, e in enumerate(state.events) if e[0] == "issue" and e[1] == 1
-    )
-    assert create_index < issue1_checkpoint, (
+    assert create_index < checkpoint_index, (
         "checkpoint for issue 1 must come after create_issue; "
-        f"create_index={create_index}, checkpoint_index={issue1_checkpoint}"
+        f"timeline={timeline.events!r}"
     )
 
 
@@ -1742,7 +1822,7 @@ def test_orchestrator_pauses_between_issue_mutation_calls(monkeypatch: Any) -> N
 
     def _timed_close_issue(github_number: int) -> None:
         timeline.append(("mutation", "close_issue"))
-        api.calls.append(("close_issue", str(int(github_number) - 100)))
+        api.record("close_issue", str(int(github_number) - 100))
 
     api.create_issue = _timed_create_issue  # type: ignore[method-assign]
     api.create_comment = _timed_create_comment  # type: ignore[method-assign]
@@ -1873,7 +1953,7 @@ def test_orchestrator_ensures_each_label_before_creating_issue() -> None:
         name: str, color: str = "", description: str = ""
     ) -> None:
         order.append(f"ensure_label:{name}")
-        api.calls.append(("ensure_label", name))
+        api.record("ensure_label", name)
 
     api.create_issue = _recording_create_issue  # type: ignore[method-assign]
     api.ensure_label = _recording_ensure_label  # type: ignore[attr-defined]
