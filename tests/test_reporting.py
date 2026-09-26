@@ -172,9 +172,12 @@ def test_result_with_failure_does_not_claim_all_migrated():
     assert "all migrated" not in lower, (
         "must not claim 'all migrated' when a failure exists; got:\n" + text
     )
-    # The failed count must be named explicitly.
-    assert "1" in text, (
-        "expected the failed count to appear in the report; got:\n" + text
+    # The failed count must be named explicitly, in the labelled form the
+    # reporter emits. A bare "1" would be satisfied by any digit anywhere in
+    # the summary -- a timestamp, an issue number, a line number -- and so
+    # would not pin the count at all.
+    assert "1 failed" in lower, (
+        "expected the labelled failure count '1 failed' to appear; got:\n" + text
     )
 
 
