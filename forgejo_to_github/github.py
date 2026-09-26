@@ -252,9 +252,7 @@ class GitHubClient:
         self._transport: Transport = (
             transport if transport is not None else RequestsTransport()
         )
-        self._timeout: float = (
-            DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout
-        )
+        self._timeout: float = DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout
 
     # --- properties ---------------------------------------------------------
 

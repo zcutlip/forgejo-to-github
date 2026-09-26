@@ -522,9 +522,7 @@ class GitMirror:
                     )
                 if not isinstance(raw_timeout_stderr, str):
                     raw_timeout_stderr = ""
-                sanitized_stderr = redact_token(
-                    raw_timeout_stderr, self._github_token
-                )
+                sanitized_stderr = redact_token(raw_timeout_stderr, self._github_token)
                 advisory = _clone_advisory(sanitized_stderr, exit_code=None)
                 raise GitCloneTimeoutError(
                     f"git clone timed out after {exc.timeout}s\n"
@@ -576,18 +574,13 @@ class GitMirror:
         if not os.path.isdir(path):
             return False
         try:
-            bare = self._run(
-                ["git", "-C", path, "rev-parse", "--is-bare-repository"]
-            )
+            bare = self._run(["git", "-C", path, "rev-parse", "--is-bare-repository"])
             if str(getattr(bare, "stdout", "") or "").strip() != "true":
                 return False
             origin = self._run(
                 ["git", "-C", path, "config", "--get", "remote.origin.url"]
             )
-            return (
-                str(getattr(origin, "stdout", "") or "").strip()
-                == self._source_url
-            )
+            return str(getattr(origin, "stdout", "") or "").strip() == self._source_url
         except KeyboardInterrupt:
             raise
         except Exception:  # noqa: BLE001 — any validation failure means "invalid"

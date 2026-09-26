@@ -309,12 +309,8 @@ class Reporter:
         issues_skipped = _get_field(result, "issues_skipped", 0)
         if not isinstance(issues_skipped, int):
             issues_skipped = 0
-        succeeded_count = (
-            issues_succeeded if isinstance(issues_succeeded, int) else 0
-        )
-        attempted_count = (
-            issues_attempted if isinstance(issues_attempted, int) else 0
-        )
+        succeeded_count = issues_succeeded if isinstance(issues_succeeded, int) else 0
+        attempted_count = issues_attempted if isinstance(issues_attempted, int) else 0
         comments_attempted_count = (
             comments_attempted if isinstance(comments_attempted, int) else 0
         )
@@ -323,15 +319,9 @@ class Reporter:
             # All-skipped on resume: nothing was attempted because every
             # issue was already checkpointed.
             skipped_lines: list[str] = []
-            skipped_lines.append(
-                "Migration complete — all issues already migrated"
-            )
-            skipped_lines.append(
-                f"Issues: 0 migrated ({issues_skipped} skipped)"
-            )
-            if comments_attempted_count > 0 and isinstance(
-                comments_succeeded, int
-            ):
+            skipped_lines.append("Migration complete — all issues already migrated")
+            skipped_lines.append(f"Issues: 0 migrated ({issues_skipped} skipped)")
+            if comments_attempted_count > 0 and isinstance(comments_succeeded, int):
                 skipped_lines.append(
                     f"Comments: {comments_succeeded}/{comments_attempted} migrated"
                 )
@@ -339,11 +329,7 @@ class Reporter:
             _emit(skipped_lines, use_error=False)
             return
 
-        if (
-            attempted_count == 0
-            and issues_skipped == 0
-            and succeeded_count == 0
-        ):
+        if attempted_count == 0 and issues_skipped == 0 and succeeded_count == 0:
             # Empty source: nothing was attempted, skipped, or succeeded.
             empty_lines: list[str] = []
             empty_lines.append("Migration complete — nothing to do")

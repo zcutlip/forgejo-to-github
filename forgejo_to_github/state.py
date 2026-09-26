@@ -45,7 +45,15 @@ from filelock import FileLock, Timeout
 # triggers a ``StateLoadError``. This set is part of the public contract;
 # adding a new key is an explicit change to the format.
 ACCEPTED_KEYS: frozenset[str] = frozenset(
-    {"source", "target", "migrated", "repo_created", "git_pushed", "version", "clone_path"}
+    {
+        "source",
+        "target",
+        "migrated",
+        "repo_created",
+        "git_pushed",
+        "version",
+        "clone_path",
+    }
 )
 
 # Current state-file schema version. Files without a ``"version"`` key

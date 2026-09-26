@@ -139,9 +139,10 @@ def infer_cwd_source(runner: Callable[..., Any]) -> CwdSource:
     """
     try:
         work_tree = runner(["git", "rev-parse", "--is-inside-work-tree"])
-        work_ok = getattr(work_tree, "returncode", 1) == 0 and str(
-            getattr(work_tree, "stdout", "") or ""
-        ).strip().lower() == "true"
+        work_ok = (
+            getattr(work_tree, "returncode", 1) == 0
+            and str(getattr(work_tree, "stdout", "") or "").strip().lower() == "true"
+        )
     except Exception:  # noqa: BLE001 — runner failure means "not a work tree"
         work_ok = False
     if not work_ok:
@@ -161,9 +162,10 @@ def infer_cwd_source(runner: Callable[..., Any]) -> CwdSource:
         raise CwdError("cwd is a shallow checkout; re-clone without --depth")
 
     partial = runner(["git", "config", "--get", "extensions.partialclone"])
-    if getattr(partial, "returncode", 1) == 0 and str(
-        getattr(partial, "stdout", "") or ""
-    ).strip():
+    if (
+        getattr(partial, "returncode", 1) == 0
+        and str(getattr(partial, "stdout", "") or "").strip()
+    ):
         raise CwdError("cwd is a partial clone; re-clone without --filter")
 
     return CwdSource(
@@ -173,9 +175,7 @@ def infer_cwd_source(runner: Callable[..., Any]) -> CwdSource:
     )
 
 
-def remote_ref_tips(
-    runner: Callable[..., Any], url: str
-) -> dict[str, str]:
+def remote_ref_tips(runner: Callable[..., Any], url: str) -> dict[str, str]:
     """Map remote ``ls-remote`` tips to ``{ref: sha}`` (heads+tags only).
 
     Sends the no-prompt SSH environment; drops synthetic namespaces
@@ -235,9 +235,7 @@ def local_ref_map(runner: Callable[..., Any]) -> dict[str, str]:
     return refs
 
 
-def ref_contains(
-    runner: Callable[..., Any], ancestor_sha: str, ref: str
-) -> bool:
+def ref_contains(runner: Callable[..., Any], ancestor_sha: str, ref: str) -> bool:
     """Report whether ``ancestor_sha`` is an ancestor of ``ref``."""
     result = runner(["git", "merge-base", "--is-ancestor", ancestor_sha, ref])
     return getattr(result, "returncode", 1) == 0
@@ -253,9 +251,7 @@ def _short_tag(ref: str) -> str:
     return ref[len("refs/tags/") :]
 
 
-def check_freshness(
-    runner: Callable[..., Any], origin_url: str
-) -> FreshnessResult:
+def check_freshness(runner: Callable[..., Any], origin_url: str) -> FreshnessResult:
     """Compare remote tips against local refs (remote-driven).
 
     Catches :class:`ProbeError` and returns a ``probe_failed``
@@ -364,9 +360,7 @@ def format_local_only_notice(result: FreshnessResult) -> str | None:
         return None
     bits: list[str] = []
     if result.local_only_branches:
-        bits.append(
-            f"branches [{', '.join(result.local_only_branches)}]"
-        )
+        bits.append(f"branches [{', '.join(result.local_only_branches)}]")
     if result.local_only_tags:
         bits.append(f"tags [{', '.join(result.local_only_tags)}]")
     return f"local-only refs that will migrate: {', '.join(bits)}"
