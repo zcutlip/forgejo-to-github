@@ -139,3 +139,31 @@ pip install -e ".[dev]"   # installs type stubs
 ruff check .              # lint
 mypy f2gh.py forgejo_to_github/  # type-check
 ```
+
+## Issue branch workflow
+
+Issue work goes on a branch named `dev/<issue-number>-<short-slug>`
+(the type is not encoded in the branch name):
+
+```bash
+scripts/issue-branch create feature 6 local-clone-invocation
+```
+
+While the branch is active the version is a PEP 440 development version
+(such as `1.4.0.dev1+issue-6-local-clone-invocation`); `finish`/`release`
+finalizes it to the release version. Keep `CHANGELOG.md`'s `[Unreleased]`
+section updated as you work — it gets promoted to a dated version heading
+at release time.
+
+```bash
+scripts/issue-branch create <type> <issue-number> <short-slug>  # feature|fix|docs|refactor|test|chore
+scripts/issue-branch resume <type> <issue-number> <short-slug>
+scripts/issue-branch status
+scripts/issue-branch bump-version --major|--minor|--patch
+scripts/issue-branch finish [--skip-tests] [--skip-changelog]
+scripts/issue-branch release [--major|--minor|--patch] [--no-bump] [--skip-tests] [--skip-changelog]
+```
+
+`finish` (on a branch) and `release` (directly on `main`) run the test
+suite and take `--skip-tests` / `--skip-changelog` as escape hatches.
+Pushing and creating the GitHub release stay manual.
