@@ -59,7 +59,6 @@ from __future__ import annotations
 import logging
 import subprocess
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -986,83 +985,6 @@ def test_tag_push_failure_is_nonfatal_for_issue_migration(tmp_path: Any) -> None
 
 
 # ---------------------------------------------------------------------------
-# Clone path cleanup on failure
+# Clone path cleanup on failure, timeout, and interrupt is covered against a
+# real partial path in ``test_clone_cache.py``.
 # ---------------------------------------------------------------------------
-
-
-def test_clone_failure_removes_clone_path_before_raising(tmp_path: Any) -> None:
-    """A clone that exits non-zero raises a ``GitCloneError``-shaped
-    exception and removes the given clone path, so no orphaned clone
-    directory is left behind on the failure path.
-    """
-    cpe = _make_cpe(
-        cmd=[
-            "git",
-            "clone",
-            "--mirror",
-            "https://codeberg.org/owner/repo.git",
-            "/tmp/f2gh-repo-0",
-        ],
-        stderr=("fatal: unable to access '...': Could not resolve host: codeberg.org"),
-        returncode=128,
-    )
-    runner = _FakeRunner(responses={"clone": cpe})
-    cache_path = str(tmp_path / "mirror")
-
-    mirror = GitMirror(
-        source_url="https://codeberg.org/owner/repo.git",
-        target_url="https://github.com/owner/target.git",
-        github_token=TOKEN_SENTINEL,
-        command_runner=runner,
-    )
-
-    with pytest.raises(Exception) as exc_info:
-        mirror.clone_into(cache_path)
-
-    assert "GitCloneError" in type(exc_info.value).__name__
-    assert not Path(cache_path).exists()
-
-
-def test_clone_keyboard_interrupt_removes_clone_path_and_reraises(
-    tmp_path: Any,
-) -> None:
-    """A clone interrupted by ``KeyboardInterrupt`` re-raises the
-    interrupt and removes the given clone path, so no orphaned clone
-    directory survives an aborted clone.
-    """
-    runner = _FakeRunner(responses={"clone": KeyboardInterrupt()})
-    cache_path = str(tmp_path / "mirror")
-
-    mirror = GitMirror(
-        source_url="https://codeberg.org/owner/repo.git",
-        target_url="https://github.com/owner/target.git",
-        github_token=TOKEN_SENTINEL,
-        command_runner=runner,
-    )
-
-    with pytest.raises(KeyboardInterrupt):
-        mirror.clone_into(cache_path)
-
-    assert not Path(cache_path).exists()
-
-
-def test_clone_timeout_removes_clone_path_before_raising(tmp_path: Any) -> None:
-    """A clone that times out raises a timeout-shaped ``GitCloneError``
-    and removes the given clone path, so no orphaned clone directory is
-    left behind on the timeout path.
-    """
-    runner = _FakeRunner(timeout=True)
-    cache_path = str(tmp_path / "mirror")
-
-    mirror = GitMirror(
-        source_url="https://codeberg.org/owner/repo.git",
-        target_url="https://github.com/owner/target.git",
-        github_token=TOKEN_SENTINEL,
-        command_runner=runner,
-    )
-
-    with pytest.raises(Exception) as exc_info:
-        mirror.clone_into(cache_path)
-
-    assert "Timeout" in type(exc_info.value).__name__
-    assert not Path(cache_path).exists()

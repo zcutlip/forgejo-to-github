@@ -38,7 +38,11 @@ from typing import Any
 
 import pytest
 
-from forgejo_to_github.git import GitCloneError, GitMirror
+from forgejo_to_github.git import (
+    GitCloneError,
+    GitCloneTimeoutError,
+    GitMirror,
+)
 from forgejo_to_github.migration import MigrationOrchestrator
 
 SOURCE_URL = "https://codeberg.org/owner/source.git"
@@ -258,6 +262,33 @@ def test_clone_into_keyboard_interrupt_removes_partial_path(tmp_path: Any) -> No
         pass
     else:
         pytest.fail("expected KeyboardInterrupt to propagate")
+
+    assert not cache_path.exists()
+
+
+def test_clone_into_timeout_removes_partial_path(tmp_path: Any) -> None:
+    """A clone that times out removes the partial path and raises.
+
+    The third failure mode, alongside the non-zero exit and the interrupt.
+    It earns a test of its own because cleanup currently runs from a single
+    ``finally`` in ``clone_into``: a refactor that moved it into the two
+    ``except`` clauses would keep both siblings covered while silently
+    stopping cleanup on the timeout path.
+
+    The path is created and populated *before* the clone runs. The injected
+    runner never touches the filesystem, so a path that was never made would
+    leave ``not cache_path.exists()`` true while proving nothing.
+    """
+    runner = _ScriptedRunner(
+        routes={"clone": subprocess.TimeoutExpired(cmd=["git"], timeout=30.0)}
+    )
+    mirror = _make_mirror(runner)
+    cache_path = tmp_path / "mirror"
+    cache_path.mkdir()
+    (cache_path / "partial").write_text("orphan")
+
+    with pytest.raises(GitCloneTimeoutError):
+        mirror.clone_into(str(cache_path))
 
     assert not cache_path.exists()
 
