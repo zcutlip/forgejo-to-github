@@ -268,7 +268,18 @@ def test_prepare_raises_state_write_error_when_directory_cannot_be_created(
         store.prepare()
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="root bypasses directory permission bits, so the premise is unobservable",
+)
 def test_prepare_raises_state_write_error_when_directory_not_writable(tmp_path):
+    """A state directory that exists but refuses writes fails fast.
+
+    A privileged runner bypasses the permission bits entirely, so the write
+    this test needs to be refused would succeed and the expected
+    ``StateWriteError`` could never be reached. The test is skipped there
+    rather than reported as a failure it did not cause.
+    """
     blocked = tmp_path / "blocked"
     blocked.mkdir()
     blocked.chmod(0o500)
@@ -359,24 +370,46 @@ def test_lock_does_not_contend_across_different_state_paths(tmp_path):
 
 
 def test_save_fsyncs_the_parent_directory_after_replace(tmp_path):
-    """Exactly one fsync targets a directory, and it comes after the file's.
+    """The rename is durable, not merely atomic.
 
-    The file fsync makes the content durable; the directory fsync makes the
-    rename itself durable, so a power loss cannot lose the checkpoint that
-    ``os.replace`` appeared to complete.
+    Three things must hold, in this order: the temp file is fsynced, then
+    ``os.replace`` puts it in place, then the parent directory is fsynced
+    exactly once. The file fsync makes the content durable; the directory
+    fsync makes the rename itself durable, so a power loss cannot lose the
+    checkpoint that ``os.replace`` appeared to complete.
+
+    ``os.replace`` is recorded on the same ordered log as the fsyncs because
+    counting fsync targets alone does not pin the middle step: a test that
+    only counts directory fsyncs still passes if the directory fsync is
+    moved ahead of the rename, which is precisely the regression this guards.
     """
     store = _store(tmp_path)
-    fsync_targets: list[bool] = []
+    order: list[str] = []
 
-    def _record(fd: int) -> None:
-        fsync_targets.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+    def _record_fsync(fd: int) -> None:
+        is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
+        order.append("fsync:dir" if is_dir else "fsync:file")
 
-    with patch("os.fsync", side_effect=_record), patch("os.replace"):
+    def _record_replace(*_args, **_kwargs) -> None:
+        order.append("replace")
+
+    with (
+        patch("os.fsync", side_effect=_record_fsync),
+        patch("os.replace", side_effect=_record_replace),
+    ):
         store.save(repo_created=False, git_pushed=False, migrated={})
 
-    assert fsync_targets, "save() must fsync at least once"
-    assert fsync_targets[0] is False, "the temp file is fsynced before the rename"
-    assert fsync_targets.count(True) == 1, "exactly one directory fsync"
+    assert "replace" in order, f"save() must call os.replace; recorded: {order!r}"
+    assert order.count("fsync:dir") == 1, (
+        f"exactly one directory fsync; recorded: {order!r}"
+    )
+    assert order[0] == "fsync:file", (
+        f"the temp file is fsynced first; recorded: {order!r}"
+    )
+    assert order.index("replace") < order.index("fsync:dir"), (
+        "the directory fsync must come after os.replace, or the rename is "
+        f"not durable; recorded: {order!r}"
+    )
 
 
 # --- contract 10 (issue #5): clone_path checkpoint ----------------------------
