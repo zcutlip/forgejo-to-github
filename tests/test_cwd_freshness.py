@@ -511,8 +511,11 @@ def test_check_freshness_local_only_refs_announce_only() -> None:
     assert result.divergent == []
     assert result.missing_tags == []
     assert result.moved_tags == []
-    assert result.ahead == [] or any(
-        "secret-branch" not in entry for entry in result.ahead
+    # ``ahead`` is built from the remote's heads, so a branch that exists only
+    # locally has no counterpart to be ahead of. Asserted negatively on every
+    # entry: the previous form passed whenever any *other* entry was present.
+    assert not any("secret-branch" in entry for entry in result.ahead), (
+        f"a local-only branch cannot be ahead; got: {result.ahead!r}"
     )
 
 
