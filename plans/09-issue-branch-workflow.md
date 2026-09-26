@@ -1,8 +1,8 @@
 # Shared issue-branch lifecycle workflow
 
-**GitHub issue:** TBD — file before RED.
-**Branch:** TBD — dedicated workflow branch after the issue is filed.
-**Status:** spec — no tests or implementation yet.
+**GitHub issue:** none — work is done directly in this tree.
+**Branch:** current working branch.
+**Status:** RED reopened — amending the locked tests for explicit bump levels, untracked-file rejection, deterministic recovery, status output, rebase order, and harness progress. No GREEN implementation changes yet.
 
 ## Context
 
@@ -33,10 +33,12 @@ It supports the full source lifecycle:
 create <type> <issue-number> <short-slug>
 resume <type> <issue-number> <short-slug>
 status
-bump-version [--major|--minor|--patch]
+bump-version --major|--minor|--patch
 finish [--skip-tests] [--skip-changelog]
 release [--major|--minor|--patch] [--no-bump] [--skip-tests] [--skip-changelog]
 ```
+
+`bump-version` requires exactly one explicit level. The configured branch template does not preserve branch type, so there is no branch-type default.
 
 No `.sh` extension, matching the shared repository’s naming policy.
 
@@ -80,7 +82,7 @@ Version bumps follow branch type:
 
 `finish` replaces the development version with the final release version before merging.
 
-`resume` reuses the same template and version calculation as `create`, but checks out the existing branch instead of creating a new one. `bump-version` defaults to the branch-type bump level unless an explicit `--major`, `--minor`, or `--patch` option is supplied.
+`resume` reuses the same template and version calculation as `create`, but checks out the existing branch instead of creating a new one. `bump-version` has no type-derived default: the caller must supply `--major`, `--minor`, or `--patch` because the branch name does not encode the branch type.
 
 The version source remains project-specific. For this project, the helper uses the existing version-resolution behavior and updates:
 
@@ -115,7 +117,7 @@ Normal `finish` must:
 
 - verify it is on an issue branch;
 - reject uncommitted tracked changes;
-- warn interactively about untracked files;
+- reject untracked files by naming them in command output and exiting 1, without prompting;
 - run the configured project test command unless `--skip-tests` is supplied;
 - require promotable changelog content unless `--skip-changelog` is supplied;
 - rebase the issue branch onto the configured base branch;
@@ -127,12 +129,12 @@ Normal `finish` must:
 - stop before pushing;
 - stop before creating a GitHub release.
 
-Post-merge `finish` recovery applies when `finish` is invoked on the base branch and the latest base-branch commit message closes an issue. It must:
+Post-merge `finish` recovery applies when `finish` is invoked on the base branch and the latest base-branch commit message closes an issue. Recovery never prompts. It must:
 
 - create no additional merge;
 - report that tagging is complete if the release tag already exists;
-- prompt before converting a development version into a release version and tagging it;
-- prompt before tagging an already-final release version;
+- if the release tag is missing and the current version carries a development or local suffix, replace it with the release core, commit that change, then create the annotated tag;
+- if the release tag is missing and the current version is already final, tag the current release core;
 - stop before pushing.
 
 `release` requires the base branch and provides changelog, version, test, commit, and tag behavior directly on the base branch when no issue branch is involved. It supports `--major`, `--minor`, `--patch`, `--no-bump`, `--skip-tests`, and `--skip-changelog`. It does not fetch; the user ensures the base branch is current before invoking it.
@@ -143,9 +145,9 @@ Post-merge `finish` recovery applies when `finish` is invoked on the base branch
 |---|---|---|---|---|---|
 | `create` | current branch must equal `BASE_BRANCH`; reject duplicate branch names | clean tracked tree | not run | not required | none |
 | `resume` | current branch must equal `BASE_BRANCH`; branch must already exist | clean tracked tree | not run | not required | none |
-| `status` | current branch must match the issue-branch pattern | untracked files reported, never blocking | not run | readiness reported, never mutated | nonfatal remote refresh permitted; never mutates branches, versions, changelog, or tags; never pushes |
-| `bump-version` | refuse `BASE_BRANCH`; preserve issue metadata from the branch name | clean tracked tree | not run | not required | none |
-| `finish` | issue-branch pattern for normal finish; base branch plus qualifying merge message for recovery | reject uncommitted tracked changes; warn interactively about untracked files | required unless `--skip-tests` | required unless `--skip-changelog` | fetch/rebase/merge permitted only as part of the explicitly invoked operation; never push |
+| `status` | current branch must match the issue-branch pattern | untracked files reported, never blocking | not run | report branch, issue, current version, release version, configured test command, and changelog readiness; never mutate changelog, version, tags, or HEAD | nonfatal remote refresh permitted; never mutates branches, versions, changelog, or tags; never pushes |
+| `bump-version` | refuse `BASE_BRANCH`; preserve issue metadata from the branch name; require one explicit `--major`, `--minor`, or `--patch` | clean tracked tree | not run | not required | none |
+| `finish` | issue-branch pattern for normal finish; base branch plus qualifying merge message for recovery | reject uncommitted tracked changes; reject untracked files by naming them in output, without prompting | required unless `--skip-tests` | required unless `--skip-changelog` | rebase before changelog promotion; fetch/rebase/merge permitted only as part of the explicitly invoked operation; never push; recovery creates no additional merge and never prompts |
 | `release` | current branch must equal `BASE_BRANCH` | reject uncommitted tracked changes | required unless `--skip-tests` | required unless `--skip-changelog` | no fetch or push |
 
 The clean-tree requirement for `create`, `resume`, and `bump-version` is deliberate hardening: it prevents unrelated staged changes from being swept into an automated version-bump commit. The branch-template, configurable paths, POSIX implementation, and portable changelog handling are adaptations; no lifecycle command is omitted.
@@ -183,6 +185,8 @@ Configure this project through `scripts/project_settings.sh`:
 - package/version resolution: existing `ROOT_PACKAGE_NAME`;
 - publication: disabled, no PyPI upload.
 
+Project integration also requires adding `issue-branch` to the submodule `install` symlink list and adding the `ISSUE_BRANCH_*` settings above to `scripts/project_settings.sh`. Those are GREEN integration changes, not RED changes.
+
 Update `AGENTS.md` and `README.md` only to document the approved workflow and the agent/use distinction. Do not duplicate the helper implementation in this repository.
 
 ## Test contract (RED stage)
@@ -200,22 +204,27 @@ It must cover:
 - development-version calculation and formatting;
 - final-version replacement;
 - `bump-version` refusal on the base branch;
+- `bump-version` rejection when no explicit level is supplied;
 - `status` non-mutating behavior;
+- `status` reporting of branch, issue, current version, release version, test command, and changelog readiness;
 - changelog promotion and empty-changelog rejection;
 - missing-changelog rejection;
 - uncommitted-tracked-change rejection;
-- untracked-file warning for `finish`;
+- untracked-file rejection for `finish`, including naming the files in command output;
+- `finish` success when the base branch advances with a non-overlapping changelog change before promotion, proving rebase happens before promotion;
 - invocation of the configured test command;
 - test-failure exit behavior;
 - `--skip-tests` and `--skip-changelog` behavior for direct user invocation;
 - `finish` merge-message and tagging behavior;
 - post-merge tag-recovery behavior without creating another merge;
+- post-merge recovery conversion of a development version to the release core before tagging;
+- per-test harness progress output, without changing assertions;
 - release bump-level and `--no-bump` behavior;
 - direct-release tagging behavior;
 - no fetch behavior for `release`;
 - no push or remote-release behavior.
 
-No implementation work begins until the issue is filed, the RED tests are approved and committed, and their failures are established for the contract reason.
+No GREEN implementation changes begin until these RED amendments are approved and committed, and their failures are established for the contract reason.
 
 ## Out of scope
 
