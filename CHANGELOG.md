@@ -14,13 +14,19 @@ Changes to exit-status contracts are recorded under `Changed`.
 - Add local-checkout freshness checks before migration.
 - Add explicit handling for divergent, missing, and moved local refs.
 - Support `--cwd` for selecting the local checkout used as the migration source.
-- Ensure `--yes` covers all migration confirmations.
+- Ensure `--yes` answers every prompt that remains once the source and target are resolved.
 
 ### Changed
 
 - Failed clones now exit with status `4` instead of sharing status `2` with invalid invocations.
 - Declined confirmations now exit with status `5` instead of `1` (or `0` for the target-repository prompt).
 - Interrupted migrations now exit with status `130` after printing a clean message instead of a traceback.
+- `--cwd` whose inferred source contradicts an explicit `--source` is a usage error (exit `2`).
+- `--yes` without an explicit `--source`, and without `--cwd` to infer one, is a usage error (exit `2`).
+- `--yes` with an omitted `--target` is a usage error (exit `2`).
+- A failed or empty GitHub user lookup while resolving the default target is a usage error (exit `2`) rather than a silent fallback.
+- `--clean` requires an explicit `--target`; omitting it is a usage error (exit `2`) in every mode, including `--dry-run`.
+- Declining the local-checkout source gate exits with status `5`.
 
 ### Fixed
 
