@@ -268,9 +268,7 @@ def resolve_target(
         _split_owner_repo("target", explicit)
         return explicit
     if bool(getattr(args, "yes", False)):
-        print(
-            "error: --yes requires an explicit --target", file=sys.stderr
-        )
+        print("error: --yes requires an explicit --target", file=sys.stderr)
         raise SystemExit(2)
     try:
         login = user_resolver()
@@ -283,8 +281,7 @@ def resolve_target(
         raise SystemExit(2)
     if not login:
         print(
-            "error: could not determine the GitHub user; "
-            "pass --target explicitly",
+            "error: could not determine the GitHub user; pass --target explicitly",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -321,9 +318,7 @@ def gate_local_source(
     (declining aborts with exit 5); a fresh result only announces
     local-only refs that will migrate. Returns the freshness result.
     """
-    print(
-        f"Using local checkout {cwd.path} as clone source (origin {cwd.origin_url})"
-    )
+    print(f"Using local checkout {cwd.path} as clone source (origin {cwd.origin_url})")
     if has_uncommitted_changes(runner):
         print("uncommitted changes present; only branches and tags migrate")
     freshness = check_freshness(runner, cwd.origin_url)
@@ -358,9 +353,7 @@ def resolve_clean_target(args: argparse.Namespace) -> str:
     """
     target = getattr(args, "target", None)
     if not isinstance(target, str) or not target:
-        print(
-            "error: --clean requires an explicit --target", file=sys.stderr
-        )
+        print("error: --clean requires an explicit --target", file=sys.stderr)
         raise SystemExit(2)
     return target
 
@@ -476,9 +469,7 @@ def _resolve_migration_target(args: argparse.Namespace, source_slug: str) -> str
         token=github_token,
         transport=RequestsTransport(),
     )
-    return resolve_target(
-        args, source_slug, github_user_client.get_current_user
-    )
+    return resolve_target(args, source_slug, github_user_client.get_current_user)
 
 
 def _build_orchestrator(args: argparse.Namespace) -> MigrationOrchestrator:
