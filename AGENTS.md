@@ -107,6 +107,9 @@ When modifying or executing code in this codebase, AI agents **MUST** strictly a
 - Keep clone failures terminal; Git push failures may continue to issue migration; `--skip-git` is the explicit issue-only path.
 - **Branch workflow:** Do issue work on a dedicated branch named
   `dev/<issue-number>-<short-slug>` (e.g. `dev/8-rate-limit-sleep-cap`).
+  The supported way to create it is `scripts/issue-branch create
+  <type> <issue-number> <short-slug>` (e.g. `scripts/issue-branch create
+  fix 8 rate-limit-sleep-cap`); the naming convention is unchanged.
   Multi-issue plans use one branch named after the plan instead
   (matches the historical `dev/003-package-refactor`). Branch from a
   current `main`; one branch per issue or plan, never batch unrelated
@@ -145,7 +148,29 @@ f2gh --source owner/repo --target owner/repo --dry-run
 
 Lint and format are delegated to `@lint` (who uses the lint-format skill) — never hand-run `ruff`. Never tell `@lint` how to do its job. Scope-defining input only.
 
+### Issue branch workflow
+
+`scripts/issue-branch` automates the issue/branch/changelog/release workflow:
+
+```bash
+scripts/issue-branch create <type> <issue-number> <short-slug>  # <type>: feature, fix, docs, refactor, test, chore
+scripts/issue-branch resume <type> <issue-number> <short-slug>
+scripts/issue-branch status
+scripts/issue-branch bump-version --major|--minor|--patch
+scripts/issue-branch finish [--skip-tests] [--skip-changelog]
+scripts/issue-branch release [--major|--minor|--patch] [--no-bump] [--skip-tests] [--skip-changelog]
+```
+
+- The helper automates commits, so an agent must never run it on its own initiative; the user explicitly directs each invocation.
+- Agents must never pass `--skip-tests` or `--skip-changelog`; those flags exist for direct user invocation only.
+- The helper never pushes and never creates a GitHub release.
+
 ### Releases
+
+`scripts/issue-branch finish` / `scripts/issue-branch release` handle the
+changelog promotion, version commit, and tag, so the manual steps below are
+the ones that remain manual: pushing the branch/tags and creating the
+GitHub release.
 
 Fully manual — there is no PyPI publish step; `README.md` installs via
 `pipx` from the git URL.
