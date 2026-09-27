@@ -104,13 +104,15 @@ scripts/issue-branch resume <type> <issue-number> <short-slug>
 scripts/issue-branch status
 scripts/issue-branch bump-version --major|--minor|--patch
 scripts/issue-branch finish
-scripts/issue-branch release [--major|--minor|--patch] [--no-bump]
+scripts/issue-branch release
 ```
 
 - `status` is read-only and reports the issue, current version, release version, and changelog readiness — run it before choosing a release command.
 - **`finish` is the normal end-of-branch step.** It runs the tests, rebases onto `main`, promotes `[Unreleased]`, commits the version, **merges `--no-ff` into `main`**, and tags. There is no separate manual merge.
 - **`finish` takes no bump level.** `create` already wrote a dev version encoding the intended bump — `1.4.0.dev0` releases as `1.4.0`.
-- **`release --major|--minor|--patch` is for bumping an already-released version**, not for finishing a dev-versioned branch; `release --minor` on `1.4.0.dev0` would yield `1.5.0`.
+- **`release` requires you to be on `main`** and never mutates the version string. It reads the version, promotes `[Unreleased]`, commits, and tags. It refuses a dev/local-suffixed version (use `finish` or `bump-version`) and refuses an already-tagged version.
+- **Version mutation belongs to four subcommands:** `create` and `finish` are the normal path (start bumps by branch type plus a dev suffix; `finish` strips to the reserved core). `resume` and `bump-version` are valves — they only restore or re-level a version the normal path would have produced, never invent one.
+- **Work committed straight to `main` has no subcommand that can number it.** Edit `__about__.py` to the new version yourself, then run `release`. The already-tagged guard makes a forgotten bump fail loudly instead of producing a duplicate changelog heading.
 - The helper automates commits: never run it on your own initiative, and never pass `--skip-tests` or `--skip-changelog` (those exist for direct user invocation). It never pushes and never creates a GitHub release.
 
 ### Releases

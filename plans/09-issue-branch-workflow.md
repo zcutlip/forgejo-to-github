@@ -3,6 +3,8 @@
 **GitHub issue:** none — work is done directly in this tree.
 **Branch:** current working branch.
 **Status:** complete — implemented, verified, and committed in both trees.
+Partially superseded by `plans/12-release-version-ownership.md` (the `release`
+version-ownership contract).
 
 ## Context
 
@@ -137,6 +139,13 @@ Post-merge `finish` recovery applies when `finish` is invoked on the base branch
 - if the release tag is missing and the current version is already final, tag the current release core;
 - stop before pushing.
 
+> **Superseded in part by `plans/12-release-version-ownership.md`.** `release`
+> no longer owns the version string: it reads the version, promotes the
+> changelog, commits, and tags, and it no longer supports `--major`,
+> `--minor`, `--patch`, or `--no-bump`. It also refuses a dev/local-suffixed
+> version and refuses an already-tagged version. `--skip-tests` and
+> `--skip-changelog` are unchanged. See plan 12 §2 for the current design.
+
 `release` requires the base branch and provides changelog, version, test, commit, and tag behavior directly on the base branch when no issue branch is involved. It supports `--major`, `--minor`, `--patch`, `--no-bump`, `--skip-tests`, and `--skip-changelog`. It does not fetch; the user ensures the base branch is current before invoking it.
 
 ### 5A. Validation matrix
@@ -219,7 +228,10 @@ It must cover:
 - post-merge tag-recovery behavior without creating another merge;
 - post-merge recovery conversion of a development version to the release core before tagging;
 - per-test harness progress output, without changing assertions;
-- release bump-level and `--no-bump` behavior;
+- release bump-level and `--no-bump` behavior — **removed by
+  `plans/12-release-version-ownership.md`**, which replaces them with
+  assertions that `release` leaves the version file untouched, refuses a
+  dev/local-suffixed version, and refuses an already-tagged version;
 - direct-release tagging behavior;
 - no fetch behavior for `release`;
 - no push or remote-release behavior.
