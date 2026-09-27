@@ -265,9 +265,13 @@ def test_orchestrator_end_to_end_parity_with_real_payload_shapes(
                 status_code=200,
                 json_payload={"description": "source repo description"},
             ),
-            FakeResponse(status_code=200, json_payload=[dict(fresh_issue), dict(resumed_issue)]),
+            FakeResponse(
+                status_code=200, json_payload=[dict(fresh_issue), dict(resumed_issue)]
+            ),
             FakeResponse(status_code=200, json_payload=[]),
-            FakeResponse(status_code=200, json_payload=[dict(c) for c in fresh_comments]),
+            FakeResponse(
+                status_code=200, json_payload=[dict(c) for c in fresh_comments]
+            ),
             FakeResponse(status_code=200, json_payload=[]),
         ]
     )
@@ -350,7 +354,9 @@ def test_orchestrator_end_to_end_parity_with_real_payload_shapes(
         if c.method == "POST"
         and c.url == "https://api.github.com/repos/owner/target/issues"
     ]
-    assert len(issue_posts) == 1, f"expected one issue-create POST, got {github_transport.calls!r}"
+    assert len(issue_posts) == 1, (
+        f"expected one issue-create POST, got {github_transport.calls!r}"
+    )
     issue_body = issue_posts[0].json_body["body"]
     expected_issue_body = format_issue_body(
         "owner/source", 2, "bob", "2024-03-01", "fresh body text"
@@ -367,7 +373,9 @@ def test_orchestrator_end_to_end_parity_with_real_payload_shapes(
         if c.method == "POST"
         and c.url == "https://api.github.com/repos/owner/target/labels"
     ]
-    assert len(label_posts) == 2, f"expected two label-create POSTs, got {github_transport.calls!r}"
+    assert len(label_posts) == 2, (
+        f"expected two label-create POSTs, got {github_transport.calls!r}"
+    )
     label_by_name = {c.json_body["name"]: c.json_body for c in label_posts}
     assert set(label_by_name) == {"bug", "feature"}
     assert label_by_name["bug"]["color"] == "d73a4a"
@@ -380,7 +388,9 @@ def test_orchestrator_end_to_end_parity_with_real_payload_shapes(
         if c.method == "POST"
         and c.url == "https://api.github.com/repos/owner/target/issues/101/comments"
     ]
-    assert len(comment_posts) == 3, f"expected three comment POSTs, got {github_transport.calls!r}"
+    assert len(comment_posts) == 3, (
+        f"expected three comment POSTs, got {github_transport.calls!r}"
+    )
     expected_comment_bodies = [
         format_comment_body("alice", "2024-03-02", "first!"),
         format_comment_body("carol", "2024-03-03", "second thought"),
@@ -390,7 +400,9 @@ def test_orchestrator_end_to_end_parity_with_real_payload_shapes(
 
     # --- repo created with the fetched source description; no PATCH ---
     repo_posts = [
-        c for c in github_transport.calls if c.url == "https://api.github.com/user/repos"
+        c
+        for c in github_transport.calls
+        if c.url == "https://api.github.com/user/repos"
     ]
     assert len(repo_posts) == 1
     assert repo_posts[0].json_body["description"] == "source repo description"
@@ -420,7 +432,9 @@ def test_orchestrator_end_to_end_parity_with_real_payload_shapes(
     assert result.git["push"] == "ok"
 
     # --- git_pushed persisted; skip lines in the recording sinks ---
-    persisted = StateStore(state_path, source="owner/source", target="owner/target").load()
+    persisted = StateStore(
+        state_path, source="owner/source", target="owner/target"
+    ).load()
     assert persisted["git_pushed"] is True
     assert persisted["migrated"] == {1: 99, 2: 101}
     assert any("SKIP CB #1: already migrated" in line for line in out.lines), (
@@ -433,7 +447,9 @@ def test_orchestrator_end_to_end_parity_with_real_payload_shapes(
     # --- resume: second orchestrator against the persisted state skips Git ---
     codeberg_transport2 = FakeTransport(
         responses=[
-            FakeResponse(status_code=200, json_payload=[dict(fresh_issue), dict(resumed_issue)]),
+            FakeResponse(
+                status_code=200, json_payload=[dict(fresh_issue), dict(resumed_issue)]
+            ),
             FakeResponse(status_code=200, json_payload=[]),
         ]
     )

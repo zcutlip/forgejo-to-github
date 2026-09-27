@@ -544,9 +544,7 @@ class MigrationOrchestrator:
             mirror_path = self._resolve_mirror_path()
             if self._cache_is_reusable(mirror_path):
                 local_path = mirror_path
-                self._safe_git_phase_finished(
-                    f"reusing cached mirror: {mirror_path}"
-                )
+                self._safe_git_phase_finished(f"reusing cached mirror: {mirror_path}")
             else:
                 # Invalid or missing cache: remove it via the cleanup
                 # seam (scoped to the resolved cache path) before the
@@ -559,8 +557,7 @@ class MigrationOrchestrator:
                 # Clone is terminal. Any raise propagates out of ``run``
                 # and the result is never returned to the caller for this run.
                 self._safe_git_phase_finished(
-                    f"cloning {getattr(self.repo, 'source', '')}"
-                    f" into {mirror_path}"
+                    f"cloning {getattr(self.repo, 'source', '')} into {mirror_path}"
                 )
                 local_path = str(clone_into_fn(mirror_path))
                 self._checkpoint_clone_path(local_path)

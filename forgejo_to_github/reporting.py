@@ -18,7 +18,8 @@ from typing import Protocol, cast
 
 EXIT_SUCCESS: int = 0
 EXIT_INCOMPLETE: int = 1
-EXIT_FAILURE: int = 2
+EXIT_FAILURE: int = 4  # terminal clone failure
+EXIT_DECLINED: int = 5  # user-declined outcome
 
 
 class Sink(Protocol):
@@ -308,12 +309,8 @@ class Reporter:
         issues_skipped = _get_field(result, "issues_skipped", 0)
         if not isinstance(issues_skipped, int):
             issues_skipped = 0
-        succeeded_count = (
-            issues_succeeded if isinstance(issues_succeeded, int) else 0
-        )
-        attempted_count = (
-            issues_attempted if isinstance(issues_attempted, int) else 0
-        )
+        succeeded_count = issues_succeeded if isinstance(issues_succeeded, int) else 0
+        attempted_count = issues_attempted if isinstance(issues_attempted, int) else 0
         comments_attempted_count = (
             comments_attempted if isinstance(comments_attempted, int) else 0
         )
@@ -322,15 +319,9 @@ class Reporter:
             # All-skipped on resume: nothing was attempted because every
             # issue was already checkpointed.
             skipped_lines: list[str] = []
-            skipped_lines.append(
-                "Migration complete — all issues already migrated"
-            )
-            skipped_lines.append(
-                f"Issues: 0 migrated ({issues_skipped} skipped)"
-            )
-            if comments_attempted_count > 0 and isinstance(
-                comments_succeeded, int
-            ):
+            skipped_lines.append("Migration complete — all issues already migrated")
+            skipped_lines.append(f"Issues: 0 migrated ({issues_skipped} skipped)")
+            if comments_attempted_count > 0 and isinstance(comments_succeeded, int):
                 skipped_lines.append(
                     f"Comments: {comments_succeeded}/{comments_attempted} migrated"
                 )
@@ -338,11 +329,7 @@ class Reporter:
             _emit(skipped_lines, use_error=False)
             return
 
-        if (
-            attempted_count == 0
-            and issues_skipped == 0
-            and succeeded_count == 0
-        ):
+        if attempted_count == 0 and issues_skipped == 0 and succeeded_count == 0:
             # Empty source: nothing was attempted, skipped, or succeeded.
             empty_lines: list[str] = []
             empty_lines.append("Migration complete — nothing to do")
@@ -377,6 +364,9 @@ class Reporter:
         dry_run = _get_field(result, "dry_run", False)
         if dry_run:
             return EXIT_SUCCESS
+        aborted = _get_field(result, "aborted", False)
+        if aborted:
+            return EXIT_DECLINED
         git = _get_field(result, "git", {"clone": "skipped", "push": "skipped"})
         if not isinstance(git, dict):
             git = {"clone": "skipped", "push": "skipped"}
@@ -410,6 +400,7 @@ def _get_field(obj: object, name: str, default: object) -> object:
 
 
 __all__ = [
+    "EXIT_DECLINED",
     "EXIT_FAILURE",
     "EXIT_INCOMPLETE",
     "EXIT_SUCCESS",

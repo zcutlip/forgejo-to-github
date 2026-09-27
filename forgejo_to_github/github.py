@@ -252,9 +252,7 @@ class GitHubClient:
         self._transport: Transport = (
             transport if transport is not None else RequestsTransport()
         )
-        self._timeout: float = (
-            DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout
-        )
+        self._timeout: float = DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout
 
     # --- properties ---------------------------------------------------------
 
@@ -395,6 +393,13 @@ class GitHubClient:
             },
         )
         self._raise_for_response(response, url_post)
+
+    def get_current_user(self) -> str:
+        """Return the ``login`` of the authenticated user via ``GET /user``."""
+        url = f"{self._base_url}/user"
+        response = self._request_with_rate_limit_retry("GET", url)
+        self._raise_for_response(response, url)
+        return str(response.json()["login"])
 
     # --- internals ----------------------------------------------------------
 

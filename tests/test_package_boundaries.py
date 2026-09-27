@@ -25,7 +25,11 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import os
 import pkgutil
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -88,49 +92,139 @@ def _import_attr(module_name: str, attr: str):
 
 # --- 1. package imports perform no network or subprocess work ---------------
 
+# Child-process script shared by both import guards below. It installs the
+# guard, imports the package, then walks and imports every submodule, then
+# prints the sentinel. The submodule walk is load-bearing: the package
+# ``__init__`` imports only ``__about__``, so importing the package name alone
+# would load none of the modules that could plausibly have import-time side
+# effects.
+_CHILD_IMPORT_SCRIPT = """
+import importlib
+import pkgutil
+import sys
 
-def test_importing_package_does_not_perform_network_calls(monkeypatch):
+{guard}
+
+import {package}
+
+for _info in pkgutil.walk_packages({package}.__path__, {package}.__name__ + "."):
+    importlib.import_module(_info.name)
+
+print({sentinel!r})
+sys.stdout.flush()
+"""
+
+# Printed by the child only if every guard stayed quiet through the import.
+_IMPORT_CLEAN_SENTINEL = "f2gh-import-clean"
+
+
+def _repo_root() -> Path:
+    """Repository root, derived from this file's location rather than cwd."""
+    return Path(__file__).resolve().parents[1]
+
+
+def _run_import_child(guard_source: str) -> subprocess.CompletedProcess:
+    """Run the guarded import in a fresh interpreter and return the result.
+
+    A fresh process is what makes the guard meaningful: an in-process
+    ``importlib.import_module`` is a ``sys.modules`` cache hit once collection
+    has imported the package, so it would exercise no module-level code at all.
+    """
+    script = _CHILD_IMPORT_SCRIPT.format(
+        guard=guard_source,
+        package=PACKAGE_NAME,
+        sentinel=_IMPORT_CLEAN_SENTINEL,
+    )
+    env = dict(os.environ)
+    # Point the child at this checkout rather than relying on an editable
+    # install being present, and do not let an inherited PYTHONPATH shadow it.
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        str(_repo_root())
+        if not existing
+        else os.pathsep.join([str(_repo_root()), existing])
+    )
+    return subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(_repo_root()),
+        # check=False is explicit and load-bearing: a tripped guard must
+        # surface as a non-zero exit that _assert_import_was_clean reports
+        # with the child's stdout and stderr attached, not as a
+        # CalledProcessError from here that hides the child's own traceback.
+        check=False,
+    )
+
+
+def _assert_import_was_clean(result: subprocess.CompletedProcess) -> None:
+    """Assert the guarded child import succeeded and reached the sentinel."""
+    assert result.returncode == 0, (
+        "importing the package tripped an import-time guard; the child "
+        f"interpreter exited {result.returncode}.\n"
+        f"stdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    assert _IMPORT_CLEAN_SENTINEL in result.stdout, (
+        "the guarded child never reached the post-import sentinel, so the "
+        f"import did not complete.\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
+    )
+
+
+def test_importing_package_does_not_perform_network_calls():
     """Importing the package must not contact any remote service.
 
-    We patch the standard ``socket``-level entry points so that any
-    accidental DNS lookup or HTTP connection during import would raise.
-    A clean import is the contract.
+    The guard blocks the standard ``socket``-level entry points, so any
+    accidental DNS lookup or HTTP connection raises during import. The import
+    runs in a fresh interpreter: an in-process import would be served from
+    ``sys.modules`` and execute no module-level code, so the guard would prove
+    nothing. Every submodule is imported too, since the package ``__init__``
+    pulls in only ``__about__``.
     """
-    import socket
-
-    def _forbid(*_args, **_kwargs):
-        raise AssertionError("forgejo_to_github must not open sockets at import time")
-
-    monkeypatch.setattr(socket, "create_connection", _forbid, raising=False)
-    monkeypatch.setattr(socket, "getaddrinfo", _forbid, raising=False)
-
-    # ``importlib.import_module`` will re-run the package __init__; a clean
-    # return is the assertion.
-    assert importlib.import_module(PACKAGE_NAME) is not None
+    result = _run_import_child(
+        """
+import socket
 
 
-def test_importing_package_does_not_execute_subprocess(monkeypatch):
+def _forbid(*_args, **_kwargs):
+    raise AssertionError(
+        "forgejo_to_github must not open sockets at import time"
+    )
+
+socket.create_connection = _forbid
+socket.getaddrinfo = _forbid
+"""
+    )
+    _assert_import_was_clean(result)
+
+
+def test_importing_package_does_not_execute_subprocess():
     """Importing the package must not spawn subprocesses.
 
-    Patching ``subprocess.Popen`` and ``os.system`` to raise guarantees
-    that any module-level side effect attempting to launch a process is
-    surfaced as a failure during the RED stage.
+    Both ``subprocess.Popen`` and ``os.system`` are blocked: ``os.system``
+    reaches the C-level ``system()`` without going through ``Popen``, so
+    blocking only one would let half the original guard's surface through. As
+    with the network guard, the import runs in a fresh interpreter and covers
+    every submodule.
     """
-    import os
-    import subprocess
+    result = _run_import_child(
+        """
+import os
+import subprocess
 
-    def _forbid_popen(*_args, **_kwargs):
-        raise AssertionError(
-            "forgejo_to_github must not launch subprocesses at import time"
-        )
 
-    def _forbid_system(*_args, **_kwargs):
-        raise AssertionError("forgejo_to_github must not call os.system at import time")
+def _forbid(*_args, **_kwargs):
+    raise AssertionError(
+        "forgejo_to_github must not launch processes at import time"
+    )
 
-    monkeypatch.setattr(subprocess, "Popen", _forbid_popen, raising=False)
-    monkeypatch.setattr(os, "system", _forbid_system, raising=False)
-
-    assert importlib.import_module(PACKAGE_NAME) is not None
+subprocess.Popen = _forbid
+os.system = _forbid
+"""
+    )
+    _assert_import_was_clean(result)
 
 
 # --- 2. intended public classes exist and are importable --------------------

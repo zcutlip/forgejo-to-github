@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -40,7 +41,7 @@ from forgejo_to_github.state import StateLockedError, StateWriteError
 # ---------------------------------------------------------------------------
 
 
-def _run_parse_args(argv: list[str]) -> None:
+def _run_parse_args(argv: list[str]) -> argparse.Namespace:
     """Invoke ``f2gh.parse_args`` with the supplied argv.
 
     ``parse_args`` calls ``argparse.ArgumentParser.parse_args`` which
@@ -48,68 +49,37 @@ def _run_parse_args(argv: list[str]) -> None:
     parse_args function itself so we observe the real argparse path.
     """
     with patch.object(sys, "argv", ["f2gh", *argv]):
-        f2gh.parse_args()
+        return f2gh.parse_args()
 
 
 # ---------------------------------------------------------------------------
-# 1. Missing required arguments
+# 1. Source/target optionality and argument validation
 # ---------------------------------------------------------------------------
 
 
-def test_parse_args_missing_source_exits_nonzero_with_usage(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Omitting ``--source`` must SystemExit with code 2 and a usage message."""
-    with pytest.raises(SystemExit) as exc_info:
-        _run_parse_args(["--target", "owner/target"])
+def test_parse_args_source_defaults_none_when_omitted() -> None:
+    """Omitting ``--source`` parses; the slug is inferred later, not by argparse."""
+    args = _run_parse_args(["--target", "owner/target"])
 
-    # argparse uses exit code 2 for argument-validation failures.
-    assert exc_info.value.code == 2
-
-    captured = capsys.readouterr()
-    # argparse writes the usage banner to stderr.
-    assert captured.err, "expected argparse to write usage to stderr"
-    assert "usage:" in captured.err.lower(), (
-        "expected 'usage:' in stderr, got: " + captured.err
-    )
-    # argparse names the offending flag in the error line.
-    assert "--source" in captured.err, (
-        "expected '--source' in stderr error message, got: " + captured.err
-    )
+    assert args.source is None
+    assert args.target == "owner/target"
 
 
-def test_parse_args_missing_target_exits_nonzero_with_usage(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Omitting ``--target`` must SystemExit with code 2 and a usage message."""
-    with pytest.raises(SystemExit) as exc_info:
-        _run_parse_args(["--source", "owner/source"])
+def test_parse_args_target_defaults_none_when_omitted() -> None:
+    """Omitting ``--target`` parses; the default resolves later, not by argparse."""
+    args = _run_parse_args(["--source", "owner/source"])
 
-    assert exc_info.value.code == 2
-
-    captured = capsys.readouterr()
-    assert captured.err
-    assert "usage:" in captured.err.lower()
-    assert "--target" in captured.err, (
-        "expected '--target' in stderr error message, got: " + captured.err
-    )
+    assert args.source == "owner/source"
+    assert args.target is None
 
 
-def test_parse_args_missing_both_required_exits_nonzero(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Omitting both required flags must SystemExit non-zero and show usage."""
-    with pytest.raises(SystemExit) as exc_info:
-        _run_parse_args([])
+def test_parse_args_source_and_target_both_default_none() -> None:
+    """Omitting both flags parses; inference supplies them downstream."""
+    args = _run_parse_args([])
 
-    assert exc_info.value.code == 2
-
-    captured = capsys.readouterr()
-    assert "usage:" in captured.err.lower()
-    # Either or both flags may be referenced; the test only requires usage text.
-    assert ("--source" in captured.err) or ("--target" in captured.err), (
-        "expected at least one required flag named in stderr, got: " + captured.err
-    )
+    assert args.source is None
+    assert args.target is None
+    assert args.cwd is False
 
 
 def test_parse_args_unknown_flag_exits_nonzero_with_usage(
@@ -241,6 +211,45 @@ def test_main_invokes_parse_args_then_orchestrator_flow() -> None:
     fake_orchestrator.run.assert_called_once_with()
     fake_reporter.render_final.assert_called_once_with(sentinel_result)
     fake_reporter.exit_outcome.assert_called_once_with(sentinel_result)
+
+
+def test_main_declined_target_prompt_exits_five() -> None:
+    """A declined target-repo creation prompt aborts the run with exit 5.
+
+    Drives ``main()`` end to end with a declined pre-git run: the fake
+    orchestrator returns a result carrying ``aborted`` True, exposes no
+    ``reporter`` attribute so ``main()`` falls back to a real
+    ``Reporter``, and the real ``render_final`` + ``exit_outcome``
+    mapping decides the exit code.
+    """
+    args = argparse.Namespace(
+        source="owner/source",
+        target="owner/target",
+        dry_run=False,
+        yes=False,
+        skip_git=True,
+        public=False,
+        description=None,
+    )
+    declined_result = SimpleNamespace(
+        aborted=True,
+        dry_run=False,
+        failures=[],
+        issues_failed=0,
+        comments_failed=0,
+        git={"clone": "skipped", "push": "skipped"},
+    )
+    fake_orchestrator = SimpleNamespace(run=Mock(return_value=declined_result))
+
+    with (
+        patch.object(f2gh, "parse_args", return_value=args),
+        patch.object(f2gh, "_build_orchestrator", return_value=fake_orchestrator),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        f2gh.main()
+
+    assert declined_result.aborted is True
+    assert exc_info.value.code == 5
 
 
 def test_parse_args_returns_namespace_with_expected_attributes(
@@ -606,9 +615,7 @@ def test_main_reports_lock_contention_distinctly(
 # ---------------------------------------------------------------------------
 
 
-def _isolated_user_dirs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _isolated_user_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Point platform user dirs at tmp_path so --clean never touches home."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
@@ -638,7 +645,9 @@ def test_parse_args_clean_flag_parses(
 ) -> None:
     """--clean parses as a store_true flag alongside source/target."""
     with patch.object(
-        sys, "argv", ["f2gh", "--source", "owner/source", "--target", "owner/target", "--clean"]
+        sys,
+        "argv",
+        ["f2gh", "--source", "owner/source", "--target", "owner/target", "--clean"],
     ):
         args = f2gh.parse_args()
 
@@ -720,9 +729,7 @@ def test_main_clean_refuses_while_state_locked(
     from forgejo_to_github.state import StateStore
 
     _isolated_user_dirs(tmp_path, monkeypatch)
-    state_path = state_path_for(
-        default_state_base(), "owner/source", "owner/target"
-    )
+    state_path = state_path_for(default_state_base(), "owner/source", "owner/target")
     holder = StateStore(state_path, "owner/source", "owner/target")
     holder.prepare()
     try:
@@ -748,3 +755,98 @@ def test_main_clean_refuses_while_state_locked(
     assert exc_info.value.code == f2gh.EXIT_STATE_ERROR
     captured = capsys.readouterr()
     assert captured.err, "expected a refusal message on stderr"
+
+
+# ---------------------------------------------------------------------------
+# Ctrl+C during cwd resolution (interrupt exits 130, never a traceback)
+# ---------------------------------------------------------------------------
+
+_ORIGIN_URL = "ssh://git@codeberg.org/o/r.git"
+
+
+def _ok_rc(stdout: str) -> SimpleNamespace:
+    return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+
+class _InterruptibleRunner:
+    """Scripted git runner; raises KeyboardInterrupt on the configured argv."""
+
+    def __init__(
+        self,
+        script: dict[tuple[str, ...], SimpleNamespace],
+        interrupt_on: tuple[str, ...],
+    ) -> None:
+        self._script = script
+        self._interrupt_on = interrupt_on
+
+    def __call__(self, argv: list[str], **kwargs: object) -> SimpleNamespace:
+        if tuple(argv) == self._interrupt_on:
+            raise KeyboardInterrupt
+        return self._script[tuple(argv)]
+
+
+def _valid_cwd_script() -> dict[tuple[str, ...], SimpleNamespace]:
+    """Script the validation probes; the network probe is KI-injected."""
+    return {
+        ("git", "rev-parse", "--is-inside-work-tree"): _ok_rc("true\n"),
+        ("git", "ls-remote", "--get-url", "origin"): _ok_rc(_ORIGIN_URL + "\n"),
+        ("git", "rev-parse", "--is-shallow-repository"): _ok_rc("false\n"),
+        ("git", "config", "--get", "extensions.partialclone"): SimpleNamespace(
+            returncode=1, stdout="", stderr=""
+        ),
+        ("git", "status", "--porcelain"): _ok_rc(""),
+    }
+
+
+def _run_main_expecting_interrupt() -> None:
+    """Run ``main()`` converting an escaped KeyboardInterrupt to a failure.
+
+    Wrapping is required: an escaping KeyboardInterrupt aborts the pytest
+    session instead of recording a normal failure.
+    """
+    try:
+        f2gh.main()
+    except KeyboardInterrupt:
+        pytest.fail("KeyboardInterrupt escaped main() instead of exiting 130")
+
+
+def test_interrupt_during_freshness_probe_exits_130_cleanly(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ctrl+C during the freshness probe exits 130 with the interrupt message."""
+    runner = _InterruptibleRunner(
+        _valid_cwd_script(), interrupt_on=("git", "ls-remote", _ORIGIN_URL)
+    )
+    monkeypatch.setattr(f2gh, "_git_runner", runner)
+    with (
+        patch.object(sys, "argv", ["f2gh", "--cwd", "--target", "o/r"]),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        _run_main_expecting_interrupt()
+
+    assert exc_info.value.code == 130
+    err = capsys.readouterr().err
+    assert "Interrupted by user" in err
+    assert "warning" not in err.lower()
+    assert "Traceback" not in err
+
+
+def test_interrupt_before_state_path_bound_exits_130_cleanly(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Ctrl+C during source inference still exits 130 without naming state."""
+    runner = _InterruptibleRunner(
+        _valid_cwd_script(),
+        interrupt_on=("git", "rev-parse", "--is-inside-work-tree"),
+    )
+    monkeypatch.setattr(f2gh, "_git_runner", runner)
+    with (
+        patch.object(sys, "argv", ["f2gh", "--cwd", "--target", "o/r"]),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        _run_main_expecting_interrupt()
+
+    assert exc_info.value.code == 130
+    err = capsys.readouterr().err
+    assert "Interrupted by user" in err
+    assert "state saved to" not in err
