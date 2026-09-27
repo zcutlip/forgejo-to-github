@@ -47,13 +47,21 @@ are removed.
 |---|---|---|---|
 | `create` | base | bump by branch type (feature→minor, else patch) + dev suffix | **normal** — start |
 | `finish` | issue branch | strip to the reserved core version | **normal** — end |
-| `resume` | base | re-derive `create`'s value, **only if it differs** | **valve** — repair |
+| `resume` | base | re-derive `create`'s value from the passed type, **only if it differs** | **valve** — repair or re-level |
 | `bump-version` | issue branch | re-level, keeping the dev suffix | **valve** — correct scope |
 
-**Invariant.** The normal path has exactly two mutation points. A valve can
-only restore or re-level a version the normal path would have produced; neither
-invents a version the normal path could not. No subcommand writes a version
-without either an explicit level or a development suffix to strip.
+**Invariant.** The normal path has exactly two mutation points. A valve only
+derives a version from values already in play — a type and the base branch's
+version, or an explicit level — so neither invents a version the normal path
+could not. No subcommand writes a version without either an explicit level or a
+development suffix to strip.
+
+`resume`'s type argument is authoritative: it re-levels in **both** directions,
+including downward. `create feature 6` → `1.4.0.dev1+…`, then `resume fix 6` →
+`1.3.1.dev1+…`. Consequently `create` → `bump-version --minor` → `resume
+feature 6` reverts the correction, and that is intended: passing a type that
+contradicts an earlier `bump-version` is the caller asking for a different
+level, not a defect to guard against.
 
 **Accepted cost.** Work committed straight to the base branch has no
 subcommand that can number it, so it takes a documented manual step: edit
@@ -66,7 +74,13 @@ G2 is what makes forgetting that step loud instead of silent.
 |---|---|---|
 | **G1** | `release` refuses a dev/local-suffixed version, naming `finish` and `bump-version` | fixes the reported bug; `release` can no longer be pointed at a version it would misread |
 | **G2** | `release` refuses when the current version is already tagged | a forgotten manual bump otherwise produces a duplicate `## [x.y.z]` heading, then `tag_release` (:245-249) reports "already tagged", returns `SUCCESS`, and exits 0 — a silent no-op release |
-| **G3** | `resume` preserves an existing dev marker for its own branch; recomputes only when the version is missing, foreign, or unparseable | today `create feature 6` → `bump-version --minor` (`1.5.0.dev1+…`) → `resume feature 6` re-derives from the base branch's `1.3.0` and **reverts the correction to `1.4.0.dev1+…`**. The conditional write is necessary but not sufficient. |
+
+**Withdrawn: G3** (preserve an existing dev marker in `resume`). Implementation
+surfaced a conflict with the locked `test_resume_bumps_dev_version`, which
+asserts that `resume` re-levels *downward* to match its type argument. G3 would
+have made that test fail. The reversion it guarded is intended behavior under
+the authoritative-type rule in §2, so the guard was withdrawn rather than the
+test.
 
 G2 is implemented in `cmd_release`, **not** in `tag_release`: `finish`'s
 post-merge recovery already short-circuits at :480-483, and making
@@ -86,7 +100,7 @@ post-merge recovery already short-circuits at :480-483, and making
   - guard order: `require_base_branch` → `require_clean_tree` → G1 → G2, so
     `test_release_rejects_issue_branch` still gets the branch error rather
     than a version error
-- `cmd_resume`: G3 logic.
+- `cmd_resume`: unchanged.
 - Header comment (:11) and `usage()` (:281) drop the removed flags.
 - `bump_core`'s dev-suffix handling is **left as-is**. It is correct for a
   final version (`1.3.0` + patch → `1.3.1`), which is what `create`,
@@ -115,7 +129,7 @@ after use. All exits go through `quit`.
   `require_base_branch` fires first.
 - **New** G2 test: pre-create tag `v1.3.0`, then `release` → exit 1, and no
   duplicate `## [1.3.0]` heading.
-- **New** G3 test: `create feature 6 …` → `bump-version --minor` → `resume feature 6 …` → version is still `1.5.0.dev1+issue-6-…`.
+- **New** G1 and G2 tests only. No G3 test.
 - Update the `run_test` registry for the delete and the three additions.
 
 ## 6. Documentation
