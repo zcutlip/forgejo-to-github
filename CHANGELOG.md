@@ -6,6 +6,8 @@ Changes to exit-status contracts are recorded under `Changed`.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-26
+
 ### Added
 
 - Support migrating directly from a local checkout.
