@@ -1,6 +1,6 @@
 # Plan 14 — `write_version` must preserve the version file
 
-**Status:** spec — awaiting review.
+**Status:** spec — revised after audit (`plans/14-write-version-preserves-file-audit-2026-09-28.md`), awaiting review.
 
 **Contract change to:** `submodules/repo-mgmt-scripts/src/issue-branch`
 **References:** none filed. `repo-mgmt-scripts` is a shared tool with no
@@ -55,10 +55,9 @@ hand fixed it.
 printf '__version__ = "%s"\n' "$_version" > "$_dir/sample/__about__.py"
 ```
 
-There is nothing in it to destroy, so the destructive write is invisible. This
-is the same fixture-blindness class as Finding 1 of
-`plans/archive/13-test-audit-2026-09-26.md`: the shared fixture encodes a
-simpler shape than reality, and the assertion cannot see the difference.
+There is nothing in it to destroy, so the destructive write is invisible. The
+bare fixture encodes a simpler shape than reality, and every assertion built on
+it is blind to the difference.
 
 ## 3. Design
 
@@ -70,10 +69,21 @@ or its dependencies, and `functions.sh:103` invokes it. The write side gets the
 mirror-image sibling: parse, locate the assignment node, splice in the new
 value, write the file back.
 
+**Splice mechanism, pinned.** The replacement is a **text-level** substitution:
+locate the value node's source span via `ast.get_source_segment` (or the node's
+`lineno`/`col_offset`/`end_lineno`/`end_col_offset`) and replace only that span.
+Whole-tree `ast.unparse` is explicitly **rejected** — it discards comments and
+normalises quoting and spacing, which would violate the byte-preservation
+requirement outright. All other bytes in the file are copied through verbatim.
+
 A `sed` substitution on the assignment line is the lighter alternative and is
 rejected: it cannot distinguish the plain form from the annotated form
 (`__version__: str = "..."`) without extra patterns, and it would also match a
 version-looking string appearing elsewhere in the file.
+
+**Replacement quoting.** The value span is replaced with a double-quoted literal
+(`"1.4.0"`), not `repr()`'s single-quoted form. Existing files use double quotes,
+so a double-quoted splice leaves the write invisible in diffs.
 
 **Behaviour decisions, each needing to be pinned in the spec:**
 
@@ -114,15 +124,31 @@ file `quit`:
 ### `install`
 
 Add `write_about_version.py` to the file list at `install:31`, alongside
-`read_about_version.py`, and set the executable bit per the naming policy
-(non-executable helper keeps `.py`, matching its sibling).
+`read_about_version.py`.
 
-### Naming policy
+### Naming and mode
 
-`write_about_version.py` follows `read_about_version.py`: a non-executable
-helper with a `.py` extension. The `script-must-have-extension` /
-`script-must-not-have-extension` hooks govern this; confirm against
-`.pre-commit-config.yaml` rather than assuming.
+`write_about_version.py` follows `read_about_version.py` exactly: a `.py` helper
+in `src/`, mode `755` to match its sibling's existing mode (not a
+non-executable mode — that was an error in an earlier revision of this plan).
+
+The `script-must-have-extension` / `script-must-not-have-extension` hooks do
+**not** govern this: both are scoped to `types: [shell, ...]`
+(`.pre-commit-config.yaml:13-18`), so a `.py` file is outside their reach
+entirely. The basis is the sibling precedent, nothing else.
+
+### Main repo consumption
+
+`forgejo-to-github` consumes the submodule through `scripts/` symlinks, one of
+which already exists: `scripts/read_about_version.py ->
+../submodules/repo-mgmt-scripts/src/read_about_version.py`. `write_version`
+invokes `python3 "$DIRNAME/write_about_version.py"` where `$DIRNAME` resolves to
+`scripts/`, so **`scripts/write_about_version.py` must exist as a matching
+symlink** before the submodule bump lands, or the main repo's `issue-branch`
+breaks on its first write.
+
+**User-owned, with the submodule pointer bump.** Both are listed in §9 so they
+are not lost.
 
 ## 5. Tests — `tests/test_issue_branch`
 
@@ -130,23 +156,47 @@ New fixture variant, `rich_project`, whose `sample/__about__.py` carries a
 docstring, `__title__`, `__version__`, `__summary__`, and `__all__`. Follows
 the existing `make_project` shape and takes the same optional-version argument.
 
-- **Preservation across each mutating subcommand.** `create`, `bump-version`,
-  and `finish` each leave the docstring, `__title__`, `__summary__`, and
-  `__all__` intact, and each updates `__version__` to the expected value.
+**The fixture uses the plain form** (`__version__ = "1.3.0"`), not the annotated
+form. The shared helpers `assert_version` (`:109`), `current_version_of`
+(`:166`), and the `git show` assertion (`:324`) all match with
+`sed -n 's/^__version__ = "\(.*\)"/\1/p'` — plain form only. An annotated
+`rich_project` would make every preservation assertion read as empty and fail
+for a helper limitation rather than a contract violation. The annotated form has
+its own dedicated bullet below.
+
+**Fixture copy list.** `make_project` copies exactly three files into
+`scripts/` (`:220-222`): `issue-branch`, `functions.sh`, and
+`read_about_version.py`. Both `make_project` and `rich_project` must also copy
+**`write_about_version.py`** into `scripts/`, or `write_version` fails on a
+missing file and every test that runs `create` fails for a reason
+indistinguishable from a broken implementation.
+
+- **Preservation across each mutating subcommand.** `create`, `resume`,
+  `bump-version`, and `finish` each leave the docstring, `__title__`,
+  `__summary__`, and `__all__` intact, and each updates `__version__` to the
+  expected value. All four call `write_version` (`:327`, `:367`, `:460`, `:496`
+  or `:528`).
 - **Annotated form.** A fixture using `__version__: str = "1.3.0"` is rewritten
   in place — annotation preserved, no duplicate assignment appended.
-- **Missing assignment.** A `__about__.py` with no `__version__` assignment
-  fails loudly, non-zero, and the file is left unchanged.
 - **Trailing newline.** A fixture whose file lacks a final newline keeps it
   that way after a write.
 - **Unit-level coverage of the new script.** `write_about_version.py` directly:
   preserves content, rewrites both forms, rejects a missing assignment,
-  rejects an unparseable file.
+  rejects an unparseable file, preserves comments and quoting (the
+  `ast.unparse` regression guard).
+
+**Missing-assignment coverage is unit-level only.** A subcommand-level test for
+it cannot fail for the contract reason: every mutating subcommand reads the
+version first via `current_version` → `read_about_version.py`, which already
+exits 1 on a missing assignment (`:49-50`). Such a test would abort at the read
+stage before `write_version` is reached, and would **pass** against the current
+destructive code — truncation succeeds and exits 0. The write-path contract is
+pinneable only by invoking the script directly.
 
 Each assertion must be shown to fail against the current destructive
 `write_version` before implementation — the same discipline the repo's RED
-honesty rule requires. The preservation assertions will fail immediately
-against truncation; the annotated and trailing-newline assertions are the ones
+honesty rule requires. The preservation assertions fail immediately against
+truncation; the annotated, trailing-newline, and quoting assertions are the ones
 to verify individually rather than assume.
 
 ## 6. Documentation
@@ -170,12 +220,26 @@ richer files stop losing content.
 2. `pre-commit run --all-files` — shellcheck, extension policy, YAML/JSON.
 3. An end-to-end run against a throwaway target project that has a rich
    `__about__.py`: `create` → `bump-version` → `finish`, confirming the file
-   survives all three and the version updates at each step.
+   survives all three and the version updates at each step. The throwaway
+   project is populated by **running `./install <dir>`** from the submodule,
+   which is the documented consumption path and exercises the `install` file
+   list added in §4 — not a manual `cp` of the scripts.
 4. Confirm the `forgejo-to-github` shape specifically: a copy of the real
    12-line `__about__.py` survives a `create`/`finish` cycle with its metadata
    intact.
 
-## 9. Out of scope
+## 9. Delivery steps — both user-owned
+
+These are outside the implementation but must not be lost, or the fix does not
+reach the consumer:
+
+- **`scripts/write_about_version.py` symlink** in `forgejo-to-github`, mirroring
+  the existing `scripts/read_about_version.py` link. Without it the main repo's
+  `issue-branch` breaks on its first write.
+- **Submodule pointer bump** in `forgejo-to-github`, from the current `e035871`
+  to the commit carrying this fix.
+
+## 10. Out of scope
 
 - The `forgejo-to-github` `__about__.py` restoration, done already as a
   separate manual fix.
