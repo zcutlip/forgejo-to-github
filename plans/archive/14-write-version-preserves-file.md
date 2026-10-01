@@ -1,6 +1,7 @@
 # Plan 14 — `write_version` must preserve the version file
 
-**Status:** spec — revised after audit (`plans/14-write-version-preserves-file-audit-2026-09-28.md`), awaiting review.
+**Status:** subsumed by plan 15 — RED committed at `f74cd95`; implementation
+is plan 15's GREEN (3.1–3.2). Design reference retained; archived 2026-10-01.
 
 **Contract change to:** `submodules/repo-mgmt-scripts/src/issue-branch`
 **References:** none filed. `repo-mgmt-scripts` is a shared tool with no
