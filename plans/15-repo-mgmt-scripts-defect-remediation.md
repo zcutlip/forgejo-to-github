@@ -159,7 +159,7 @@ plan-14 tests plus the new 2.7 test (with its corruption committed). All 13
 2.2 message assertions pass at baseline because the guard messages exist at
 HEAD; they are discriminators, not new failures.
 
-1. `sh tests/test_issue_branch` at GREEN — **0 failed / exit 0** with 46/46
+1. `./tests/test_issue_branch` at GREEN — **0 failed / exit 0** with 46/46
    tests passing. Gated on the failure count and exit status, not on the
    passed counter reading 46 (the suite counts *assertions*, not tests —
    the counter will read ~195+).
