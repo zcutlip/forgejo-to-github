@@ -1,14 +1,15 @@
 # Plan 15 — repo-mgmt-scripts: vacuous-pass remediation + implementation fixes
 
-**Status:** spec — revised after plan review (`plans/15-repo-mgmt-scripts-defect-remediation.review.md`), awaiting review.
+**Status:** spec — amended 2026-10-01 (`assert_exists` precondition fix, §2.8); landed RED work on disk is to be re-based on the amended tests.
 
 **Contract change to:** `submodules/repo-mgmt-scripts` — `tests/test_issue_branch` (RED), `src/` (GREEN).
 
 **References:**
 
 - `plans/archive/14-write-version-preserves-file.md` — `write_version` truncation; plan-14 RED committed at `f74cd95`; archived 2026-10-01 (subsumed here)
-- `submodules/repo-mgmt-scripts/tests/test_issue_branch.audit.md` — independent audit, 2026-09-30
+- `plans/archive/16-test-audit-2026-09-30.md` — independent test-suite audit, 2026-09-30 (findings 1–5 remediated here; archived with a resolution block)
 - `plans/15-repo-mgmt-scripts-defect-remediation.review.md` — plan review, 2026-10-01 (11 findings, all adopted except F11 noted as harmless redundancy)
+- `plans/15-assert-exists-precondition-assessment.md` — independent verification of the C6 finding, 2026-10-01 (design and all-six scope adopted; its assertion accounting corrected — current RED is 40, not 41)
 
 **Branch:** `main`, by explicit user direction. This deviates from the
 one-branch-per-plan convention in `AGENTS.md §4`; the user owns both
@@ -80,7 +81,7 @@ from earlier RED work.
 `rich_project` copy 4 scripts with no status check — 40 `cp:` error lines
 per RED run. Check status for the 3 required scripts (fail on error);
 conditional copy for `write_about_version.py` (absent during RED; its RED
-signal is `assert_exists` in the unit tests). Note: once 2.1's suite-level
+signal is `require_exists` in the unit tests). Note: once 2.1's suite-level
 guard exists, the checked `cp` calls are unreachable defense-in-depth —
 the conditional copy is the part that adds real value (kills the noise).
 
@@ -107,6 +108,59 @@ operands evaluate to 0), so `create` exits 0 today — the assertion fails
 for the contract reason.
 
 Test count 45 → 46.
+
+**2.8 `assert_exists` is a precondition, not an assertion (amended
+2026-10-01).**
+
+**Problem.** `assert_exists` is a record-and-return assertion — it matches
+the harness's uniform `assert_*` contract (every helper increments the
+counter and returns; nothing aborts the run). But in the six unit tests it
+acts as a *precondition* ("the helper must be present before we test its
+behaviour"). A precondition that only records lets the body proceed against
+the absent dependency, so a missing helper yields the named guard failure
+**plus** body noise misattributed to contract assertions (the interpreter's
+`can't open file …` text). Worse, `assert_ne "0" "$_status"` (`:1199`,
+`:1212`) **passes vacuously** on the absent script's exit 2 — a missing
+script's failure reads as "rejects." That is exactly the vacuity
+`assert_exists` was built to prevent, which is why the guard must abort.
+
+**Fix.** New helper `require_exists <name> <path>`: records `fail` and
+returns nonzero when the path is absent; returns 0 when present. Callers use
+`require_exists … || return` at the top of the test function — `return` from
+a *test* function aborts the test. **Precedent: `run_test`'s dependency
+guard (fail + return, never runs the body).** The fixture `cp` blocks
+(`if ! cp …; then fail …; return 1; fi`) are the weaker sibling — `return`
+there exits only the *fixture* function, not the calling test, so the test
+body continues. Do not copy that shape for preconditions.
+
+**Scope: all six unit tests** — `test_write_script_preserves_content`,
+`test_write_script_rewrites_plain_form`,
+`test_write_script_rewrites_annotated_form`,
+`test_write_script_rejects_missing_assignment`,
+`test_write_script_rejects_unparseable_file`,
+`test_write_script_preserves_comments_and_quoting`. All six carry the same
+misattribution class, so all six migrate — not just the two that 2.6's
+needles touched.
+
+**Remove `assert_exists`** after migration (with its docstring) — zero
+callers remain; leaving it would be dead code in the harness.
+
+**Sweep on migration.** The fixture comments inside the test file at
+`:251`/`:351` ("the RED signal carried by `assert_exists` in the unit
+tests") become `require_exists`, as do this plan's 2.5 comment and the 4.3
+matrix row.
+
+**Effect on 2.6 needles.** Once the guard aborts, the two needles are
+dormant at RED (the body never runs) and become load-bearing at GREEN — the
+designed end state, which also resolves the C6 premise discrepancy.
+
+**Accounting.** Each migrated unit test yields exactly one failing assertion
+(the guard) instead of guard + body noise. Assertion-level totals are not
+gate-relevant and are not targets; if any are quoted they are post-fix
+measurements. The landed pre-fix state measures 157 passed / 40 failed
+(37 plan-14 + 2 needles + 1 exit-status); an independent assessment's "41"
+double-counts the new test's needle, which passes at RED per 2.7's
+disclosure.
 
 ## 3. GREEN — `src/`
 
@@ -157,7 +211,8 @@ committed).
 **Expected RED shape (gates RED):** 33 tests pass / 13 fail — the 12
 plan-14 tests plus the new 2.7 test (with its corruption committed). All 13
 2.2 message assertions pass at baseline because the guard messages exist at
-HEAD; they are discriminators, not new failures.
+HEAD; they are discriminators, not new failures. Assertion-level totals are
+not part of the gate (see 2.8 accounting).
 
 1. `./tests/test_issue_branch` at GREEN — **0 failed / exit 0** with 46/46
    tests passing. Gated on the failure count and exit status, not on the
@@ -173,12 +228,13 @@ HEAD; they are discriminators, not new failures.
    - `read_about_version.py` deleted: 0/46 (guard) — was 20 suites-blind
      passes
    - `write_about_version.py` deleted **at GREEN** (load-bearing then):
-     6 unit tests fail via `assert_exists`; write-exercising integration
-     tests fail via `write_version`'s `quit`; guard-only rejection tests
-     pass legitimately (their contracts never touch `write_version`).
-     Chosen over adding it to the suite-level guard: the guard would have
-     to land as a test change inside GREEN, breaking the commit firewall;
-   the natural failures leave no vacuous passes. Disclosed, not guarded.
+     6 unit tests fail via `require_exists`, one named failure each with no
+     body noise; write-exercising integration tests fail via `write_version`'s
+     `quit`; guard-only rejection tests pass legitimately (their contracts
+     never touch `write_version`). Chosen over adding it to the suite-level
+     guard: the guard would have to land as a test change inside GREEN,
+     breaking the commit firewall; the natural failures leave no vacuous
+     passes. Disclosed, not guarded.
 4. Manual: `create` → `bump-version` → `finish` against a throwaway target
    with the real 12-line `__about__.py`; metadata survives
 

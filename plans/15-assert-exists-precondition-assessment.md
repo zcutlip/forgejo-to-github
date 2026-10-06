@@ -47,3 +47,38 @@ The plan's **gates are unaffected either way** — RED gates at test level (33 p
 5. **Accounting disclosure:** state the real assertion-level numbers if any are stated — RED 41 → ~24 with the all-six scope.
 
 **Unchanged:** the 2.6 needles themselves stay as they are — they are GREEN discriminators; they simply do not run while the guard fails.
+
+---
+
+# Revision review — amended plan 15 (2026-10-01)
+
+Appended 2026-10-01 after the plan amendment that adopted this assessment's design. Re-verifies the amended plan's [the `assert_exists` precondition fix section] against the actual shell semantics. **Nothing above is rewritten — this section corrects it where needed.**
+
+## Correction to this assessment's accounting
+
+**The amended plan's "40" is right; this assessment's "41" was wrong.** The claim above that the new [the `current_version` propagation] test contributes +2 failures at RED is the error: its needle (`Unable to read version from`) **passes vacuously at RED**. Mechanism, traced:
+
+1. `current_version` [at HEAD] runs its `quit` inside the command substitution — `quit`'s `echo` goes to the subshell's stdout, so the command substitution **captures the error text**, not empty: `$(current_version)` = `Unable to read version from sample/__about__.py`.
+2. That text is `bump_core`'s first argument in the nested call (`ib_base="$(bump_core "$(current_version)" …)"`); `cut -d. -f1` keeps everything before the first dot of the error message; the arithmetic operand (`py`) is an unset variable name in arithmetic context and evaluates to 0.
+3. The result — `"Unable to read version from sample/__about__.1.0"` — flows through `dev_version` into `write_version` and into `create`'s `Created … with version <garbage>` echo, which lands on stdout.
+4. `assert_contains` checks substring presence, and the substring is present — in the scattered fragments of a garbage version string, not as an error report.
+
+So the needle passes at RED for the wrong reason, the new test contributes +1 failure (exit status only), and RED-as-landed is 37 + 2 + 1 = **40**, exactly as the plan states. This assessment's "double-count" rebuttal was itself the error. (The same rooted error lives in one step of "What is confirmed correct" above — "the silently-empty `current_version`" — and in the audit's Context Notes memory: `current_version` never returns empty at HEAD; it returns the error text as the version.)
+
+## Confirmed correct in the amendment
+
+- **Design:** `require_exists <name> <path>` — records `fail`, returns nonzero when absent; callers `require_exists … || return` from the test function. Mirrors `run_test`'s dependency guard. Correct.
+- **Scope:** all six unit tests, with the rationale stated. Correct, and matches this assessment's endorsement.
+- **Removal of `assert_exists`** after migration (zero callers, docstring included). Correct.
+- **The fixture-cp "weaker sibling" distinction** — `return` there exits only the fixture function, not the calling test, so it is not the right shape for preconditions. Correct and a valuable clarification this assessment did not make.
+- **Reference sweeps** (test-file fixture comments, plan's conditional-copy comment, matrix row) — present and correct.
+- **2.6 needles:** dormant at RED once the guard aborts, load-bearing at GREEN. Correct.
+
+## Findings (disclosure-level; no gate or fix impact)
+
+1. **The needle's RED pass is vacuous and undisclosed.** The amendment says the needle "passes at RED per the propagation test's disclosure" — but that disclosure covers only the exit-status failure ("the assertion fails for the contract reason"); it does not mention the needle. And the needle's pass is *vacuous*: the error text appears as ingredients of a garbage version string, not as an error report from `create`. At GREEN, the 3.4 split delivers the message to the call site's `quit`, `create` exits 1 with the message on stdout, and the needle passes legitimately. Red→green transition is sound; the vacuous RED pass should be stated alongside the accounting, not left implicit.
+2. **Mechanism misstatement in the propagation test's RED-shape note.** "`bump_core ""` yields `.1.0` (empty arithmetic operands evaluate to 0)" — wrong input: `current_version` at HEAD does not return empty (see Correction above); it returns the error text. `bump_core` receives that text and yields `"Unable to read version from sample/__about__.1.0"`, not `.1.0`. The conclusion (`create` exits 0) is unaffected, but the mechanism as written describes an input that never occurs.
+
+## Status
+
+Design and scope: adopted correctly. Accounting: plan right, assessment wrong, now corrected above. Outstanding: the two disclosure-level findings above, for whoever revises the propagation test's RED-shape note and the amendment's accounting paragraph.
